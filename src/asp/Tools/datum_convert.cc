@@ -26,6 +26,7 @@
 #include <vw/Math.h>
 #include <asp/Core/Macros.h>
 #include <asp/Core/Common.h>
+#include <asp/Core/PointUtils.h>
 
 #include <boost/filesystem.hpp>
 namespace po = boost::program_options;
@@ -51,7 +52,7 @@ public:
 
   /// Image view which adds or subtracts the ellipsoid/geoid difference
   ///  from elevations in a DEM image.
-  DatumConvertView(ImageT       const& input_dem, 
+  DatumConvertView(ImageT       const& input_dem,
                    GeoReference const& input_georef,
                    GeoReference const& output_georef,
                    double nodata_val):
@@ -65,9 +66,9 @@ public:
   inline pixel_accessor origin() const { return pixel_accessor(*this); }
 
   inline result_type operator()( size_t col, size_t row, size_t p=0 ) const {
-  
+
     // Handle nodata
-    if ( m_input_dem(col, row) == m_nodata_val ) 
+    if ( m_input_dem(col, row) == m_nodata_val )
       return m_nodata_val;
 
     // Compute the elevation in the output datum
@@ -87,7 +88,7 @@ public:
       //std::cout << "gcc_coord  = " << gcc_coord     << std::endl;
       //std::cout << "out lonlat = " << output_lonlat << std::endl;
     }
-*/    
+*/
     return output_height;
   }
 
@@ -106,7 +107,7 @@ public:
 // Helper function which uses the class above.
 template <class ImageT>
 DatumConvertView<ImageT>
-datum_convert( ImageViewBase<ImageT> const& input_dem, 
+datum_convert( ImageViewBase<ImageT> const& input_dem,
                GeoReference          const& input_georef,
                GeoReference          const& output_georef,
                double                       nodata_val) {
@@ -134,9 +135,9 @@ BBox2 get_output_projected_bbox(GeoReference     const& input_georef,
 
   const int num_rows = input_dem.rows();
   const int num_cols = input_dem.cols();
-  
-  std::cout << "Image size = " << Vector2(num_cols, num_rows) << std::endl;
-  
+
+  vw_out() << "Image size = " << Vector2(num_cols, num_rows) << std::endl;
+
   // Expand along sides
   BBox2 output_bbox;
   for (int r=0; r<num_rows; ++r) {
@@ -144,7 +145,7 @@ BBox2 get_output_projected_bbox(GeoReference     const& input_georef,
     Vector2 pixel_right(num_cols-1, r);
     double height_left  = input_dem(pixel_left[0],  pixel_left[1]);
     double height_right = input_dem(pixel_right[0], pixel_right[1]);
-    
+
     output_bbox.grow(get_output_loc(pixel_left,  height_left,  input_georef, output_georef));
     output_bbox.grow(get_output_loc(pixel_right, height_right, input_georef, output_georef));
   }
@@ -155,16 +156,16 @@ BBox2 get_output_projected_bbox(GeoReference     const& input_georef,
     Vector2 pixel_bot(c, num_rows-1);
     double height_top = input_dem(pixel_top[0], pixel_top[1]);
     double height_bot = input_dem(pixel_bot[0], pixel_bot[1]);
-    
+
     output_bbox.grow(get_output_loc(pixel_top, height_top, input_georef, output_georef));
     output_bbox.grow(get_output_loc(pixel_bot, height_bot, input_georef, output_georef));
   }
-  return output_bbox;                               
+  return output_bbox;
 }
 
 
 struct Options : asp::BaseOptions {
-  string dem_path, output_path, output_datum;
+  string input_dem, output_dem, output_datum, target_srs_string;
   double nodata_value;
   bool   use_double;
 };
@@ -173,25 +174,25 @@ void handle_arguments( int argc, char *argv[], Options& opt ){
 
   po::options_description general_options("");
   general_options.add_options()
+    ("output-datum", po::value(&opt.output_datum), " The datum to convert to. Supported options: WGS_1984, NAD83, WGS72, and NAD27.")
+    ("t_srs",        po::value(&opt.target_srs_string)->default_value(""), "Specify the output datum via the PROJ.4 string.")
     ("nodata_value", po::value(&opt.nodata_value)->default_value(-32768),
-         "The value of no-data pixels, unless specified in the DEM.")
+     "The value of no-data pixels, unless specified in the DEM.")
     ("double", po::bool_switch(&opt.use_double)->default_value(false)->implicit_value(true),
-         "Output using double precision (64 bit) instead of float (32 bit).");
+     "Output using double precision (64 bit) instead of float (32 bit).");
 
   general_options.add( asp::BaseOptionsDescription(opt) );
 
   po::options_description positional("");
   positional.add_options()
-    ("dem-path",     po::value(&opt.dem_path    ), "The path to the input DEM file.")
-    ("output-datum", po::value(&opt.output_datum), "The datum to convert to.")
-    ("output-path",  po::value(&opt.output_path ), "Path to the output DEM file.");
+    ("input-dem",    po::value(&opt.input_dem  ), "The path to the input DEM file.")
+    ("output-dem",   po::value(&opt.output_dem ), "The path to the output DEM file.");
 
   po::positional_options_description positional_desc;
-  positional_desc.add("dem-path",     1);
-  positional_desc.add("output-datum", 1);
-  positional_desc.add("output-path",  1);
+  positional_desc.add("input-dem",    1);
+  positional_desc.add("output-dem",   1);
 
-  string usage("[options] <dem path> <output datum> <output path>\n Supported options for <output datum> are: wgs84, nad27, nad83, d_moon, d_mars");
+  string usage("[options] <input dem> <output dem>");
   bool allow_unregistered = false;
   vector<string> unregistered;
   po::variables_map vm =
@@ -199,14 +200,19 @@ void handle_arguments( int argc, char *argv[], Options& opt ){
                              positional, positional_desc, usage,
                              allow_unregistered, unregistered);
 
-  if ( opt.dem_path.empty() )
-    vw_throw( ArgumentErr() << "Requires <dem path> in order to proceed.\n\n"     << usage << general_options );
-  if ( opt.output_datum.empty() )
-    vw_throw( ArgumentErr() << "Requires <output datum> in order to proceed.\n\n" << usage << general_options );   
-  if ( opt.output_path.empty() )
-    vw_throw( ArgumentErr() << "Requires <output path> in order to proceed.\n\n"  << usage << general_options );
+  if ( opt.input_dem.empty() )
+    vw_throw( ArgumentErr() << "Missing input arguments.\n\n"     << usage << general_options );
+  if ( opt.output_dem.empty() )
+    vw_throw( ArgumentErr() << "Requires <output dem> in order to proceed.\n\n"  << usage << general_options );
+  if ( opt.output_datum.empty() && opt.target_srs_string.empty())
+    vw_throw( ArgumentErr() << "Requires <output datum> or PROJ.4 string in order to proceed.\n\n" << usage << general_options );
+
+  if ( !opt.output_datum.empty() && !opt.target_srs_string.empty())
+    vw_out(WarningMessage) << "Both the output datum and the PROJ.4 string were specified. The former takes precedence.\n";
 
   boost::to_lower(opt.output_datum);
+
+  vw::create_out_dir(opt.output_dem);
 
   //// Turn on logging to file
   //asp::log_to_file(argc, argv, "", opt.out_prefix);
@@ -218,49 +224,43 @@ void handle_arguments( int argc, char *argv[], Options& opt ){
 /// - TODO: This tool does everything?
 
 // --> Option 1: Run this tool before gdalwarp, all conversions handled.
-// --> Option 2: This tool does everything, but only handles datum conversions 
+// --> Option 2: This tool does everything, but only handles datum conversions
 //               within the same projection type.
 
 template <typename T>
 void do_work(Options const& opt) {
 
   // Read the DEM to adjust
-  DiskImageResourceGDAL dem_rsrc(opt.dem_path);
+  DiskImageResourceGDAL dem_rsrc(opt.input_dem);
   double dem_nodata_val = opt.nodata_value;
   if ( dem_rsrc.has_nodata_read() ) {
     dem_nodata_val = dem_rsrc.nodata_read();
-    vw_out() << "\tFound input nodata value for " << opt.dem_path << ": " << dem_nodata_val << endl;
+    vw_out() << "\tFound input nodata value for " << opt.input_dem << ": " << dem_nodata_val << endl;
   }
   DiskImageView<T> dem_img(dem_rsrc);
   GeoReference dem_georef;
   bool has_georef = read_georeference(dem_georef, dem_rsrc);
   if (!has_georef)
-    vw_throw( ArgumentErr() << "Missing georeference for DEM: " << opt.dem_path << "\n" );
+    vw_throw( ArgumentErr() << "Missing georeference for DEM: " << opt.input_dem << "\n" );
 
   // Handle the datums supported by our Datum class:
   // WGS84, WGS72, NAD83, NAD27, D_MOON, D_MARS
 
   // Create an output GeoReference object
-  string lname      = boost::to_lower_copy(opt.output_datum);
+  cartography::Datum user_datum;
+  bool have_user_datum = asp::read_user_datum(0, 0, opt.output_datum, user_datum);
   GeoReference output_georef = dem_georef;
-  if ( lname == "wgs_1984" || lname == "wgs 1984" || lname == "wgs1984" ||
-       lname == "wgs84"    || lname == "world geodetic system 1984" ){
-    output_georef.set_well_known_geogcs("WGS84");
-  }else if (lname == "north_american_datum_1983"  || lname == "nad83"){
-    output_georef.set_well_known_geogcs("NAD83");
-  }else if (lname == "north_american_datum_1927"  || lname == "nad27"){
-    output_georef.set_well_known_geogcs("NAD27");
-  }else if (lname == "d_moon"  || lname == "dmoon"){
-    output_georef.set_well_known_geogcs("D_MOON");
-  }else if (lname == "d_mars"  || lname == "dmars"){
-    output_georef.set_well_known_geogcs("D_MARS");
-  }else{
-    vw_throw( ArgumentErr() << "Did not recognize the selected output datum: "
-              << opt.output_datum << "\n");
+  if (opt.target_srs_string.empty()) {
+    if (have_user_datum)
+      output_georef.set_well_known_geogcs(opt.output_datum);
+  } else {
+    // The user specified the target srs_string
+    // Set the srs string into georef.
+    asp::set_srs_string(opt.target_srs_string, have_user_datum, user_datum, output_georef);
   }
 
-  std::cout << "Min input val = " << min_pixel_value(dem_img) << std::endl;
-  std::cout << "Max input val = " << max_pixel_value(dem_img) << std::endl;
+  vw_out() << "Min input val = " << min_pixel_value(dem_img) << std::endl;
+  vw_out() << "Max input val = " << max_pixel_value(dem_img) << std::endl;
 
   vw_out() << "Input georef:\n"  << dem_georef    << std::endl;
 
@@ -278,42 +278,42 @@ void do_work(Options const& opt) {
   output_georef.set_transform(affine);
 
   vw_out() << "Output georef:\n" << output_georef << std::endl;
-  
+
   BBox2i output_pixel_box = output_georef.point_to_pixel_bbox(output_proj_box);
   vw_out() << "Computed output pixel box:\n" << output_pixel_box << std::endl;
 
   // Update the elevation values in the image to account for the new datum.
   ImageViewRef<double> dem_new_heights = datum_convert(pixel_cast<double>(dem_img),
-                                                       dem_georef, 
+                                                       dem_georef,
                                                        output_georef,
                                                        dem_nodata_val
                                                       );
 
   // Apply the horizontal warping to the image on account of the new datum.
-  ImageViewRef<double> output_dem = apply_mask(geo_transform(create_mask(dem_new_heights, 
+  ImageViewRef<double> output_dem = apply_mask(geo_transform(create_mask(dem_new_heights,
                                                                          dem_nodata_val),
                                                              dem_georef, output_georef,
-                                                             output_pixel_box.width(), 
+                                                             output_pixel_box.width(),
                                                              output_pixel_box.height(),
                                                              ConstantEdgeExtension()
                                                             ),
                                                dem_nodata_val
                                               );
 
-  vw_out() << "Writing adjusted DEM: " << opt.output_path << endl;
+  vw_out() << "Writing adjusted DEM: " << opt.output_dem << endl;
 
   if ( opt.use_double ) {
-    // Output as double   
-    block_write_gdal_image(opt.output_path, output_dem,
+    // Output as double
+    block_write_gdal_image(opt.output_dem, output_dem,
                            true, output_georef,
                            true, dem_nodata_val, opt,
                            TerminalProgressCallback("asp", "\t--> Converting datum: ") );
   }else{
     // Output as float
-    block_write_gdal_image(opt.output_path,  pixel_cast<float>(output_dem),
+    block_write_gdal_image(opt.output_dem,  pixel_cast<float>(output_dem),
                            true, output_georef,
                            true, dem_nodata_val, opt,
-                           TerminalProgressCallback("asp", "\t--> Converting datum: ") ); 
+                           TerminalProgressCallback("asp", "\t--> Converting datum: ") );
   }
 
 }
@@ -322,12 +322,12 @@ void do_work(Options const& opt) {
 int main( int argc, char *argv[] ) {
 
   Options opt;
-  //try {
+  try {
     handle_arguments( argc, argv, opt );
 
 
     // Check the input data type
-    DiskImageResourceGDAL dem_rsrc(opt.dem_path);
+    DiskImageResourceGDAL dem_rsrc(opt.input_dem);
     ChannelTypeEnum input_data_type = dem_rsrc.channel_type();
 
     // Redirect to another function with the correct template type
@@ -344,7 +344,7 @@ int main( int argc, char *argv[] ) {
     };
 
 
- // } ASP_STANDARD_CATCHES;
+  } ASP_STANDARD_CATCHES;
 
   return 0;
 }

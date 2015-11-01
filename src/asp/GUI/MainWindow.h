@@ -3,9 +3,9 @@
 //  Administrator of the National Aeronautics and Space Administration. All
 //  rights reserved.
 //
-//  The NASA Vision Workbench is licensed under the Apache License,
-//  Version 2.0 (the "License"); you may not use this file except in
-//  compliance with the License. You may obtain a copy of the License at
+//  The NGT platform is licensed under the Apache License, Version 2.0 (the
+//  "License"); you may not use this file except in compliance with the
+//  License. You may obtain a copy of the License at
 //  http://www.apache.org/licenses/LICENSE-2.0
 //
 //  Unless required by applicable law or agreed to in writing, software
@@ -31,39 +31,54 @@
 
 #include <vw/Math/Vector.h>
 #include <vw/InterestPoint/InterestData.h>
+#include <asp/Core/Common.h>
 
 // Forward declarations
 class QAction;
 class QLabel;
 class QTabWidget;
+class QSplitter;
 
-namespace vw {
-  namespace gui {
+namespace vw { namespace gui {
+
+  enum ViewType {VIEW_SIDE_BY_SIDE, VIEW_IN_SINGLE_WINDOW, VIEW_AS_TILES_ON_GRID};
 
   class MainWidget;
   class chooseFilesDlg;
 
+  /// This class handles the menues at the top bar and other application level details.
   class MainWindow : public QMainWindow {
     Q_OBJECT
 
   public:
-    MainWindow(std::vector<std::string> const& images,
-               std::string const& output_prefix,
+    MainWindow(asp::BaseOptions const& opt,
+               std::vector<std::string> const& images,
+               std::string& output_prefix, // non-const, so we can change it
+               int grid_cols,
                vw::Vector2i const& window_size, bool single_window,
-               bool use_georef, bool hillshade, int argc, char ** argv);
+               bool use_georef, bool hillshade, bool view_matches,
+               bool delete_temporary_files_on_exit,
+               int argc, char ** argv);
     virtual ~MainWindow() {}
 
   private slots:
     void forceQuit(); // Ensure the program shuts down.
     void sizeToFit();
+    void viewSingleWindow();
+    void viewSideBySide();
+    void viewAsTiles();
+    void viewExistingMatches();
     void viewMatches();
-    void hideMatches();
+    void addDelMatches();
     void saveMatches();
+    void writeGroundControlPoints(); ///< Write a ground control point file for bundle_adjust
     void run_stereo();
     void run_parallel_stereo();
     void shadowThresholdCalc();
     void viewThreshImages();
     void viewUnthreshImages();
+    void viewHillshadedImages();
+    void viewOverlayedImages();
     void about();
 
   protected:
@@ -73,17 +88,19 @@ namespace vw {
 
     void run_stereo_or_parallel_stereo(std::string const& cmd);
 
-    void create_menus();
+    void createLayout();
+    void createMenus();
 
     // Event handlers
     void resizeEvent(QResizeEvent *);
     void closeEvent (QCloseEvent *);
 
-    std::vector<std::string> m_images;
-    std::string m_output_prefix;
-    double           m_widRatio;    // ratio of sidebar to entire win wid
-    std::vector<MainWidget*>  m_widgets;
-    chooseFilesDlg * m_chooseFiles; // left sidebar for selecting files
+    asp::BaseOptions          m_opt;
+    std::vector<std::string>  m_image_paths; ///< Loaded image files
+    std::string               m_output_prefix;
+    double                    m_widRatio;    // ratio of sidebar to entire win wid
+    std::vector<MainWidget*>  m_widgets;     ///< One of these for each seperate image pane.
+    chooseFilesDlg *          m_chooseFiles; // left sidebar for selecting files
 
     QMenu *m_file_menu;
     QMenu *m_view_menu;
@@ -93,22 +110,38 @@ namespace vw {
 
     QAction *m_about_action;
     QAction *m_shadowCalc_action;
+    QAction *m_sizeToFit_action;
+    QAction *m_viewSingleWindow_action;
+    QAction *m_viewSideBySide_action;
+    QAction *m_viewAsTiles_action;
+    QAction *m_viewHillshadedImages_action;
+    QAction *m_viewOverlayedImages_action;
     QAction *m_viewThreshImages_action;
     QAction *m_viewUnthreshImages_action;
-    QAction *m_sizeToFit_action;
     QAction *m_viewMatches_action;
-    QAction *m_hideMatches_action;
+    QAction *m_addDelMatches_action;
     QAction *m_saveMatches_action;
+    QAction *m_writeGcp_action;
     QAction *m_run_stereo_action;
     QAction *m_run_parallel_stereo_action;
     QAction *m_exit_action;
 
-    int m_argc;
-    char ** m_argv;
-    bool m_matches_were_loaded;
-    std::vector<std::vector<vw::ip::InterestPoint> > m_matches;
+    ViewType m_view_type,
+             m_view_type_old;
+    int      m_grid_cols;
+    bool     m_use_georef, m_hillshade, m_viewMatches, m_delete_temporary_files_on_exit;
+    int      m_argc;
+    char **  m_argv;
+    bool     m_matches_were_loaded;
+    std::string m_match_file;
 
-  };
+    /// A set of interest points for each input image
+    /// - There is always one set of matched interest points shared among all images.
+    /// - The only way the counts can differ is if the user is in the process of manually
+    ///   adding an interest point to the images.
+    /// - The length of the outer vector is equal to the number of MainWidget objects
+    std::vector<std::vector<vw::ip::InterestPoint> > m_matches;
+   };
 
 }} // namespace vw::gui
 

@@ -46,6 +46,63 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+// Find the best fitting rotation + translation + scale transform among
+// the two sets of points represented as matrix columns.
+Eigen::Affine3d Find3DAffineTransform(Eigen::Matrix3Xd in, Eigen::Matrix3Xd out) {
+  // Default output
+  Eigen::Affine3d A;
+  A.linear() = Eigen::Matrix3d::Identity(3, 3);
+  A.translation() = Eigen::Vector3d::Zero();
+
+  if (in.cols() != out.cols())
+    throw "Find3DAffineTransform(): input data mis-match";
+
+  // First find the scale, by finding the ratio of sums of some distances,
+  // then bring the datasets to the same scale.
+  double dist_in = 0, dist_out = 0;
+  for (int col = 0; col < in.cols()-1; col++) {
+    dist_in  += (in.col(col+1) - in.col(col)).norm();
+    dist_out += (out.col(col+1) - out.col(col)).norm();
+  }
+  if (dist_in <= 0 || dist_out <= 0)
+    return A;
+  double scale = dist_out/dist_in;
+  out /= scale;
+
+  // Find the centroids then shift to the origin
+  Eigen::Vector3d in_ctr = Eigen::Vector3d::Zero();
+  Eigen::Vector3d out_ctr = Eigen::Vector3d::Zero();
+  for (int col = 0; col < in.cols(); col++) {
+    in_ctr  += in.col(col);
+    out_ctr += out.col(col);
+  }
+  in_ctr /= in.cols();
+  out_ctr /= out.cols();
+  for (int col = 0; col < in.cols(); col++) {
+    in.col(col)  -= in_ctr;
+    out.col(col) -= out_ctr;
+  }
+
+  // SVD
+  Eigen::MatrixXd Cov = in * out.transpose();
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(Cov, Eigen::ComputeThinU | Eigen::ComputeThinV);
+
+  // Find the rotation
+  double d = (svd.matrixV() * svd.matrixU().transpose()).determinant();
+  if (d > 0)
+    d = 1.0;
+  else
+    d = -1.0;
+  Eigen::Matrix3d I = Eigen::Matrix3d::Identity(3, 3);
+  I(2, 2) = d;
+  Eigen::Matrix3d R = svd.matrixV() * I * svd.matrixU().transpose();
+
+  // The final transform
+  A.linear() = scale * R;
+  A.translation() = scale*(out_ctr - R*in_ctr);
+
+  return A;
+}
 
 /// Analyze a file name to determine the file type
 std::string get_file_type(std::string const& file_name){
@@ -55,10 +112,14 @@ std::string get_file_type(std::string const& file_name){
   if (asp::is_las(file_name))
     return "LAS";
 
-  // Note that any tif, ntf, and cub file with one channel will be
+  // Note that any tif, ntf, and cub file with one channel with georeference be
   // interpreted as a DEM.
   int nc = vw::get_num_channels(file_name);
-  if (nc == 1)
+
+  vw::cartography::GeoReference geo;
+  bool has_georef = vw::cartography::read_georeference(geo, file_name);
+
+  if (nc == 1 && has_georef)
     return "DEM";
   if (nc >= 3)
     return "PC";
@@ -247,7 +308,7 @@ int load_csv_aux(std::string const& file_name, int num_points_to_load,
       // Parse custom CSV file with given format string
       bool success;
       vw::Vector3 vals = csv_conv.parse_csv_line(is_first_line, success, line);
-      if (!success) 
+      if (!success)
         continue;
 
       bool return_point_height = false; // will return xyz
@@ -444,8 +505,8 @@ void load_dem(bool verbose, std::string const& file_name,
   data.featureLabels = form_labels<T>(DIM);
 
   vw::cartography::GeoReference dem_geo;
-  bool is_good = vw::cartography::read_georeference( dem_geo, file_name );
-  if (!is_good)
+  bool has_georef = vw::cartography::read_georeference( dem_geo, file_name );
+  if (!has_georef)
     vw_throw(vw::ArgumentErr() << "DEM: " << file_name
                                << " does not have a georeference.\n");
 
@@ -850,6 +911,35 @@ vw::BBox2 calc_extended_lonlat_bbox(vw::cartography::GeoReference const& geo,
   return box;
 }
 
+// Sometime the box we computed with cartesian_to_geodetic is offset
+// from the box computed with pixel_to_lonlat by 360 degrees.
+// Fix that.
+void adjust_lonlat_bbox(std::string const& file_name,
+                        vw::BBox2 & box){
+
+  using namespace vw;
+
+  // Can only adjust DEM boxes
+  if (get_file_type(file_name) != "DEM")
+    return;
+
+  cartography::GeoReference georef;
+  bool has_georef = cartography::read_georeference(georef, file_name);
+  if (!has_georef)
+    vw_throw(ArgumentErr() << "DEM: " << file_name << " does not have a georeference.\n");
+
+  DiskImageView<float> dem(file_name);
+  BBox2 box2 = georef.pixel_to_lonlat_bbox(bounding_box(dem));
+
+  double mean_lon  = (box.min().x() + box.max().x())/2.0;
+  double mean_lon2 = (box2.min().x() + box2.max().x())/2.0;
+
+  double lon_offset = mean_lon2 - mean_lon;
+  lon_offset = 360.0*round(lon_offset/360.0);
+
+  box += Vector2(lon_offset, 0);
+}
+
 double calc_mean(std::vector<double> const& errs, int len){
   double mean = 0.0;
   for (int i = 0; i < len; i++){
@@ -993,8 +1083,8 @@ void save_trans_point_cloud(asp::BaseOptions const& opt,
   if (file_type == "DEM"){
 
     vw::cartography::GeoReference dem_geo;
-    bool is_good = vw::cartography::read_georeference( dem_geo, input_file );
-    if (!is_good) vw_throw(vw::ArgumentErr() << "DEM: " << input_file
+    bool has_georef = vw::cartography::read_georeference( dem_geo, input_file );
+    if (!has_georef) vw_throw(vw::ArgumentErr() << "DEM: " << input_file
                            << " does not have a georeference.\n");
 
     vw::DiskImageView<float> dem(input_file);
@@ -1007,10 +1097,14 @@ void save_trans_point_cloud(asp::BaseOptions const& opt,
       geodetic_to_cartesian( dem_to_geodetic( create_mask(dem, nodata),
                                               dem_geo ),
                              dem_geo.datum() );
+
+    // Save the georeference with the cloud, to help point2dem later
+    bool has_nodata2 = false; // the cloud should not use DEM nodata
     asp::block_write_gdal_image(output_file,
                                 per_pixel_filter(point_cloud, TransformPC(T)),
-                                opt,
-                                vw::TerminalProgressCallback("asp", "\t--> "));
+                                has_georef, dem_geo,
+                                has_nodata2, nodata,
+                                opt, vw::TerminalProgressCallback("asp", "\t--> "));
 
   }else if (file_type == "PC"){
 
@@ -1018,9 +1112,9 @@ void save_trans_point_cloud(asp::BaseOptions const& opt,
     // with n channels without knowing n beforehand.
     int nc = vw::get_num_channels(input_file);
     switch(nc){
-      case 3:  save_trans_point_cloud_n<3>(opt, input_file, output_file, T);  break;
-      case 4:  save_trans_point_cloud_n<4>(opt, input_file, output_file, T);  break;
-      case 6:  save_trans_point_cloud_n<6>(opt, input_file, output_file, T);  break;
+    case 3:  save_trans_point_cloud_n<3>(opt, geo, input_file, output_file, T);  break;
+    case 4:  save_trans_point_cloud_n<4>(opt, geo, input_file, output_file, T);  break;
+    case 6:  save_trans_point_cloud_n<6>(opt, geo, input_file, output_file, T);  break;
     default:
       vw_throw( vw::ArgumentErr() << "The point cloud from " << input_file
                 << " has " << nc << " channels, which is not supported.\n" );
@@ -1108,6 +1202,12 @@ void save_trans_point_cloud(asp::BaseOptions const& opt,
         outfile << "# latitude,longitude,height above datum (meters)" << std::endl;
     }
 
+    // Save the datum, may be useful to know what it was
+    if (geo.datum().name() != UNSPECIFIED_DATUM) {
+      outfile << "# " << geo.datum() << std::endl;
+      outfile << "# Projection: " << geo.overall_proj4_str() << std::endl;
+    }
+
     int numPts = point_cloud.features.cols();
     vw::TerminalProgressCallback tpc("asp", "\t--> ");
     int hundred = 100;
@@ -1156,8 +1256,8 @@ void save_trans_point_cloud(asp::BaseOptions const& opt,
 InterpolationReadyDem load_interpolation_ready_dem(std::string                  const& dem_path,
                                                    vw::cartography::GeoReference     & georef) {
   // Load the georeference from the DEM
-  bool is_good = vw::cartography::read_georeference( georef, dem_path );
-  if (!is_good)
+  bool has_georef = vw::cartography::read_georeference( georef, dem_path );
+  if (!has_georef)
     vw::vw_throw(vw::ArgumentErr() << "DEM: " << dem_path << " does not have a georeference.\n");
 
   // Set up file handle to the DEM and read the nodata value

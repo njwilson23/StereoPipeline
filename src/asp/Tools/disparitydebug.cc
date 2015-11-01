@@ -83,12 +83,17 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
     vw_throw( ArgumentErr() << "Missing input file!\n"
               << usage << general_options );
   if ( opt.output_prefix.empty() )
-    opt.output_prefix = asp::prefix_from_filename(opt.input_file_name);
+    opt.output_prefix = vw::prefix_from_filename(opt.input_file_name);
 }
 
 template <class PixelT>
 void do_disparity_visualization(Options& opt) {
   DiskImageView<PixelT > disk_disparity_map(opt.input_file_name);
+
+  cartography::GeoReference georef;
+  bool has_georef  = read_georeference(georef, opt.input_file_name);
+  bool has_nodata = false;
+  float output_nodata = -32768.0;
 
   vw_out() << "\t--> Computing disparity range \n";
 
@@ -97,12 +102,14 @@ void do_disparity_visualization(Options& opt) {
   if ( opt.roi == BBox2(0,0,0,0) )
     roiToUse = BBox2(0,0,disk_disparity_map.cols(),disk_disparity_map.rows());
 
+  if (has_georef)
+    georef = crop(georef, roiToUse);
 
   // We don't want to sample every pixel as the image might be very
   // large. Let's subsample the image so that it is rough 1000x1000 samples.
   float subsample_amt =
     float(roiToUse.height())*float(roiToUse.width()) / ( 1000.f * 1000.f );
-    
+
   // Compute intensity display range if not passed in
   if ( opt.normalization_range == BBox2(0,0,0,0) )
     opt.normalization_range =
@@ -144,11 +151,15 @@ void do_disparity_visualization(Options& opt) {
   vw_out() << "\t--> Writing horizontal disparity debug image: " << h_file << "\n";
   block_write_gdal_image( h_file,
                           channel_cast_rescale<uint8>(horizontal),
+                          has_georef, georef,
+                          has_nodata, output_nodata,
                           opt, TerminalProgressCallback("asp","\t    H : "));
   std::string v_file = opt.output_prefix+"-V."+opt.output_file_type;
   vw_out() << "\t--> Writing vertical disparity debug image: " << v_file << "\n";
   block_write_gdal_image( v_file,
                           channel_cast_rescale<uint8>(vertical),
+                          has_georef, georef,
+                          has_nodata, output_nodata,
                           opt, TerminalProgressCallback("asp","\t    V : "));
 }
 

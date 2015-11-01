@@ -221,7 +221,7 @@ Now compare the boundaries of the two above and determine the intersection to us
 You only have to do the boundaries explicitly for the first run of
 \texttt{cam2map}, because the second one uses the \texttt{map=}
 parameter to mimic the map-projection of the first.  These two
-images are not radically different in areal coverage, so this is not
+images are not radically different in spatial coverage, so this is not
 really necessary for these images, it is just an example.
 
 Again, unless you are doing something complicated, using the
@@ -235,6 +235,14 @@ At this stage we can run the stereo program with map-projected images:
             -s stereo.default.example results/output
 \end{verbatim}
 
+Here we have used \texttt{alignment-method none} since
+\texttt{cam2map4stereo.py} brought the two images into the same
+perspective and using the same resolution. If you invoke
+\texttt{cam2map} independently on the two images, without
+\texttt{matchmap=true}, their resolutions may differ, and using an
+alignment method rather than \texttt{none} to correct for that is still
+necessary.
+
 Now you may skip to chapter \ref{nextsteps} which will discuss the
 \texttt{stereo} program in more detail and the other tools in ASP.
 
@@ -247,15 +255,16 @@ chapter in that at no point will we be using ISIS utilities. This is
 because ISIS only supports NASA instruments, while most Earth imagery
 comes from commercial providers.
 
-In addtion to Digital Globe's satelites, ASP supports any Earth imagery
+In addition to Digital Globe's satellites, ASP supports any Earth imagery
 that uses the RPC camera model format. How to process such data is
 described in section \ref{rpc}, although following this tutorial may
 still be insightful even if your data is not from Digital Globe.
 
-Digital Globe provides imagery from Quick Bird and the two World
+Digital Globe provides imagery from Quick Bird and the three World
 View satellites. These are the hardest images to process with Ames
 Stereo Pipeline because they are exceedingly large, much larger than
-HiRISE imagery. There is also a wide range of terrain challenges and
+HiRISE imagery (the GUI interface can be used to run stereo on just a
+portion of the images). There is also a wide range of terrain challenges and
 atmospheric effects that can confuse ASP. Trees are particularly
 difficult for us since their texture is nearly nadir and perpendicular
 to our line of sight. It is important to know that the driving force
@@ -341,9 +350,9 @@ the same options, as described in section \ref{stereo_gui}.
 
 \begin{figure}[h!]
 \centering
-  \includegraphics[width=2.0in]{images/examples/dg/DigitalGlobeContext.png}
-  \includegraphics[width=2.0in]{images/examples/dg/DigitalGlobeCloseUp.png}
-  \includegraphics[width=2.0in]{images/examples/dg/DigitalGlobeCloseUpDRG.png}
+  \includegraphics[width=2.0in]{images/examples/dg/DigitalGlobeContext_400px.png}
+  \includegraphics[width=2.0in]{images/examples/dg/DigitalGlobeCloseUp_400px.png}
+  \includegraphics[width=2.0in]{images/examples/dg/DigitalGlobeCloseUpDRG_400px.png}
 \caption{Example colorized height map and ortho image output.}
 \label{fig:dg-nomap-example}
 \end{figure}
@@ -374,17 +383,20 @@ is described in section \ref{mapproj-example}.
 Digital Globe World View images \cite{digital-globe:camera} may exhibit
 slight subpixel artifacts which manifest themselves as discontinuities
 in the 3D terrain obtained using ASP. We provide a tool named
-\texttt{wv\_correct} which can largely correct such artifacts for World
+\texttt{wv\_correct}, that can largely correct such artifacts for World
 View-1 and World View-2 images for most TDI. It can be invoked as
 follows:
 
 \begin{verbatim}
-    > wv_correct image.ntf image.xml image_out.tif
+    > wv_correct image_in.ntf image.xml image_out.tif
 \end{verbatim}
 
-The corrected images can be used just as the originals, and the camera models
-do not change. So one can mosaic them, perform map-projection, do
-stereo, etc.
+The corrected images can be used just as the originals, and the camera
+models do not change. When working with such imagery, we recommend that
+CCD artifact correction happen first, on original un-projected
+imagery. Afterwards images can be mosaicked with \texttt{dg\_mosaic},
+map-projected, and the resulting data used to run stereo and create
+terrain models.
 
 This tool is described in section \ref{wvcorrect}, and an example of
 using it is in Figure \ref{fig:ccd-artifact-example}.
@@ -395,6 +407,72 @@ using it is in Figure \ref{fig:ccd-artifact-example}.
   \includegraphics[width=3.0in]{images/examples/ccd_after_600px.png}
 \caption{Example of a hill-shaded terrain obtained using stereo without (left) and with (right) CCD boundary artifact corrections applied using \texttt{wv\_correct}.}
 \label{fig:ccd-artifact-example}
+\end{figure}
+
+\section{Managing Camera Jitter}
+\label{sec:jitter}
+
+In this section we will talk about the second largest source of
+inaccuracies in Digital Globe imagery, after CCD artifacts, namely
+jitter, and how to correct it.
+
+It is very important to note, right from the beginning, that the order
+in which these corrections need to be handled is the following. First,
+CCD artifacts are corrected. Then, optionally, images are mosaicked with
+\texttt{dg\_mosaic} and map-projected. And jitter should be handled last,
+during stereo.
+
+Camera jitter has its origin in the fact that the measured position and
+orientation of the image-acquiring line sensor as specified in a camera
+XML file is usually not perfectly accurate, the sensor in fact wiggles
+slightly from where it is assumed to be as it travels through space and
+appends rows of pixels to the image. This results in slight errors in
+the final DEM created using stereo. Those are most clearly seen in the
+intersection error map output by \texttt{point2dem -\/-errorimage}.
+
+ASP provides support for correcting this jitter, at least its low
+frequency component. During stereo, right before the triangulation step,
+so after the left-to-right image disparity is computed, it can solve for
+adjustments to apply to the satellite position and orientation. Those
+adjustments are placed along-track (hence at several lines in the image)
+with interpolation between them. This is quite analogous to what
+\texttt{bundle\_adjust} is doing, except that the latter uses just one
+adjustment for each image.
+
+This process can be triggered by invoking \texttt{stereo} with
+\texttt{-\/-image-lines-per-piecewise-adjustment arg}. A smaller value
+of \texttt{arg} will result in more adjustments being used (each
+adjustment being responsible for fewer image lines), hence providing
+finer-grained control, though making this number too small may result in
+over-fitting and instability. A smaller value here will also require
+overall more interest point matches (as computed from the disparity),
+which is set via \texttt{-\/-num-matches-for-piecewise-adjustment}.
+
+If it appears that the adjustments show some instability at the starting
+and ending lines due to not enough matches being present (as deduced
+from examining the intersection error image), the locations of the first
+and last adjustment (and everything in between) may be brought closer to
+each other, by modifying \texttt{-\/-piecewise-adjustment-percentiles}.
+Its values are by default 5 and 95, and could be set for example to 10
+and 90.
+
+Lastly, the way interpolation among adjustments is performed can be
+controlled with
+
+\begin{verbatim}
+  --piecewise-adjustment-interp-type
+\end{verbatim}
+
+Section \ref{triangulation_options} describes these options in detail.
+
+An illustration of jitter correction is given in figure \ref{fig:jitter-example}.
+
+\begin{figure}[h!]
+\centering
+  \includegraphics[width=6.0in]{images/jitter.jpg}
+\caption{Example of a colorized intersection error map before (left) and
+  after jitter correction.}
+\label{fig:jitter-example}
 \end{figure}
 
 
@@ -422,8 +500,8 @@ approach.
 
 \begin{figure}[h!]
 \centering
-  \includegraphics[width=3.0in]{images/examples/sparse_disp1.png}
-  \includegraphics[width=3.0in]{images/examples/sparse_disp3.png}
+  \includegraphics[width=3.0in]{images/examples/sparse_disp1_400px.png}
+  \includegraphics[width=3.0in]{images/examples/sparse_disp3_400px.png}
 \caption{Example of a difficult terrain obtained without (left) and with (right) \texttt{sparse\_disp}. (In these DEMs there is very little elevation change, hence the flat appearance.)}
 \label{fig:sparse-disp-example}
 \end{figure}
@@ -455,6 +533,12 @@ this tool for your platform. The script and instructions are at
 \begin{quote}
 \indent \href{https://github.com/NeoGeographyToolkit/BinaryBuilder/tree/master/build\_python\_modules}{https://github.com/NeoGeographyToolkit/BinaryBuilder/tree/master/build\_python\_modules}
 \end{quote}
+
+After building the \texttt{sparse\_disp} dependencies, per the instructions, the environmental
+variable \verb#ASP_PYTHON_MODULES_PATH# has to be set, for example as:
+\begin{verbatim}
+  export ASP_PYTHON_MODULES_PATH=<path to python modules>
+\end{verbatim}
 
 \section{Processing Multi-Spectral Images}
 
@@ -574,7 +658,7 @@ can be found in chapter \ref{ch:correlation}.
 
 \begin{figure}[t!]
 \begin{minipage}{4in}
-\includegraphics[width=4in]{images/p19-stereo-output.png}
+\includegraphics[width=4in]{images/p19-stereo-output_400px.png}
 \end{minipage}
 \hfill
 \begin{minipage}{2.9in}
@@ -663,19 +747,21 @@ of the two cameras are very different or the underlying terrain has
 steep portions. This will result in ASP producing terrains with noise or
 missing data.
 
-ASP can mitigate this by \texttt{map-projecting} the left and right
+ASP can mitigate this by \textit{map-projecting} the left and right
 images onto some pre-existing low-resolution smooth terrain model
 without holes, and using the output images to do stereo. In effect, this
 makes the images much more similar and more likely for stereo
 correlation to succeed.
 
-In this mode, ASP in effect does not create a terrain model from scratch,
+In this mode, ASP does not create a terrain model from scratch,
 but rather uses an existing terrain model as an initial guess, and
 improves on it.
 
 For Earth, an existing terrain model can be, for example, NASA SRTM,
 GMTED2010, USGS's NED data, or NGA's DTED data. There exist pre-made
-terrain models for other planets as well.
+terrain models for other planets as well, for example the Moon LRO LOLA
+global DEM and the Mars MGS MOLA DEM.
+
 
 Alternatively, a low-resolution smooth DEM can be obtained by running
 ASP itself as described in previous sections. In such a run, subpixel
@@ -705,7 +791,7 @@ results.
 
 \begin{figure}[h!]
 \centering
-   \includegraphics[width=6.0in]{images/stereo_mapproj.png}
+   \includegraphics[width=6.0in]{images/stereo_mapproj_400px.png}
 \caption{A DEM obtained using plain stereo (left) and stereo
   with map-projected images (right). Their quality will be comparable
   for relatively flat terrain and the second will be much better for
@@ -715,7 +801,7 @@ results.
 \end{figure}
 
 In this example we illustrate how to run stereo with map-projected
-images for ISIS images. We start with LRO NAC Lunar images M1121224102LE
+images for ISIS data. We start with LRO NAC Lunar images M1121224102LE
 and M1121209902LE from ASU's LRO NAC web site,
 http://lroc.sese.asu.edu/. We convert them to ISIS cubes using the ISIS
 program \texttt{lronac2isis}, then we use the ISIS tools
@@ -842,9 +928,9 @@ as the one used in section \ref{rawdg}.
 
 \begin{figure}[h!]
 \centering
-  \includegraphics[width=2.0in]{images/examples/dg/MappedContext.png}
-  \includegraphics[width=2.0in]{images/examples/dg/MappedCloseUp.png}
-  \includegraphics[width=2.0in]{images/examples/dg/MappedCloseUpDRG.png}
+  \includegraphics[width=2.0in]{images/examples/dg/MappedContext_400px.png}
+  \includegraphics[width=2.0in]{images/examples/dg/MappedCloseUp_400px.png}
+  \includegraphics[width=2.0in]{images/examples/dg/MappedCloseUpDRG_400px.png}
 \caption{Example colorized height map and ortho image output.}
 \label{fig:dg-map-example}
 \end{figure}
@@ -877,9 +963,10 @@ section \ref{mapproject}.
 
 In the \texttt{stereo} command, we have used \texttt{subpixel-mode 1}
 which is less accurate but reasonably fast. We have also used
-\texttt{alignment-method none}, since the images are map-projected, and
-thus no alignment is necessary. More details about how to set these and
-other \texttt{stereo} parameters can be found in section
+\texttt{alignment-method none}, since the images are map-projected onto
+the same terrain with the same resolution, thus no additional alignment
+is necessary. More details about how to set these and other
+\texttt{stereo} parameters can be found in section
 \ref{settingoptionsinstereodefault}.
 
 It is important to note here that any Digital Globe camera file has two
@@ -972,19 +1059,20 @@ shows, a quick look at some of the TIFF files in the \texttt{results/}
 directory provides some insight into the process.
 
 Perhaps the most accessible file for assessing the quality of your
-results is the good pixel image,
-\\ (\texttt{results/output-GoodPixelMap.tif}).  If this file shows
-mostly good, gray pixels in the overlap area (the area that is white
-in both the \texttt{results/output-lMask.tif} and
-\texttt{results/output-rMask.tif} files), then your results are
-just fine.  If the good pixel image shows lots of failed data,
-signified by red pixels in the overlap area, then you need to go back
-and tune your \texttt{stereo.default} file until your results improve.
-This might be a good time to make a copy of \texttt{stereo.default} as
-you tune the parameters to improve the results.
+results is the good pixel image, \\
+(\texttt{results/output-GoodPixelMap.tif}).  If this file shows mostly
+good, gray pixels in the overlap area (the area that is white in both
+the \texttt{results/output-lMask.tif} and
+\texttt{results/output-rMask.tif} files), then your results are just
+fine.  If the good pixel image shows lots of failed data, signified by
+red pixels in the overlap area, then you need to go back and tune your
+\texttt{stereo.default} file until your results improve.  This might be
+a good time to make a copy of \texttt{stereo.default} as you tune the
+parameters to improve the results.
+
 \begin{figure}[b!]
 \begin{minipage}{4in}
-\includegraphics[width=4in]{images/p19-disparity.png}
+\includegraphics[width=4in]{images/p19-disparity_400px.png}
 \end{minipage}
 \hfill
 \begin{minipage}{2.7in}
@@ -1012,12 +1100,11 @@ you tune the parameters to improve the results.
 \end{minipage}
 \end{figure}
 
-You should also know that whenever \texttt{stereo}, \texttt{point2dem},
-and other executables are run, they create log files in given tool's
-results directory, containing a copy of the configuration file, the
-command that was run, your system settings, and tool's console
-output. This will help track what was performed so that others in the
-future can recreate your work.
+Whenever \texttt{stereo}, \texttt{point2dem}, and other executables are
+run, they create log files in given tool's results directory, containing
+a copy of the configuration file, the command that was run, your system
+settings, and tool's console output. This will help track what was
+performed so that others in the future can recreate your work.
 
 Another handy debugging tool is the \texttt{disparitydebug} program,
 which allows you to generate viewable versions of the intermediate
@@ -1043,7 +1130,17 @@ You can proceed to make a mesh or a \ac{DEM} by processing
 
 Figure \ref {p19-disparity} shows the outputs of \texttt{disparitydebug}.
 
-And a note on performance. If \texttt{stereo\_corr} takes unreasonably
+If the input images are map-projected (georeferenced) and the alignment
+method is \texttt{none}, all images output by stereo are georeferenced
+as well, such as GoodPixelMap, D\_sub, disparity, etc. As such, all
+these data can be overlayed in
+\texttt{stereo\_gui}. \texttt{disparitydebug} also preserves any
+georeference.
+
+\subsection{Dealing with Long Run-times}
+\label{longrun}
+
+If \texttt{stereo\_corr} takes unreasonably
 long, it may have encountered a portion of the image where, due to noise
 (such as clouds, shadows, etc.) the determined search range is much
 larger than what it should be. The option \texttt{-\/-corr-timeout \textit{integer}}
@@ -1060,7 +1157,7 @@ the \texttt{results/output-PC.tif} point cloud file.
 
 \begin{figure}[h!]
 \begin{minipage}{5in}
-\includegraphics[width=5in]{images/p19-osg.png}
+\includegraphics[width=5in]{images/p19-osg_400px.png}
 \end{minipage}
 \hfill
 \begin{minipage}{1.7in}
@@ -1071,7 +1168,7 @@ the \texttt{results/output-PC.tif} point cloud file.
 \end{minipage}
 \end{figure}
 
-\subsection{Building a 3D Model}
+\subsection{Building a 3D Mesh Model}
 If you wish to see the data in an interactive 3D browser, then you can
 generate a 3D object file using the \texttt{point2mesh} command (page
 \pageref{point2mesh}). The resulting file is stored in Open Scene
@@ -1093,7 +1190,13 @@ lighting with the `L' key, toggle texturing with the 'T' key, and
 toggle wireframe mode with the 'W'.  Press '?' to see a variety of
 other interactive options.
 
-\subsection{Building a Digital Elevation Model}
+If you already have a DEM and an ortho image (section \ref{builddem}),
+they can be used to build a mesh as well, in the same way as done above:
+\begin{verbatim}
+  > point2mesh results/output-DEM.tif results/output-DRG.tif
+\end{verbatim}
+
+\subsection{Building a Digital Elevation Model and Ortho Image}
 \label{builddem}
 
 The \texttt{point2dem} program (page \pageref{point2dem}) creates a
@@ -1104,9 +1207,13 @@ Digital Elevation Model (\ac{DEM}) from the point cloud file.
 \end{verbatim}
 
 The resulting TIFF file is map-projected and will contain
-georeferencing information stored as GeoTIFF tags. You can specify a
-coordinate system (e.g., mercator, sinusoidal) and a reference
-spheroid (i.e., calculated for the Moon, Mars, or Earth).
+georeferencing information stored as GeoTIFF tags.
+
+The tool will infer the datum and projection from the input images, if
+present. You can explicitly specify a coordinate system (e.g.,
+mercator, sinusoidal) and a reference spheroid (i.e., calculated for the
+Moon, Mars, or Earth). Alternatively, the datum semi-axes can be set or
+a PROJ.4 string can be passed in.
 
 \begin{verbatim}
   >  point2dem -r mars results/output-PC.tif
@@ -1138,7 +1245,7 @@ show up in the orthoimage. They can be filled in using the option
 
 The \texttt{point2dem} program is also able to accept output
 projection options the same way as the tools in GDAL. Well-known EPSG,
-IAU2000 projections, and custom Proj4 strings can applied with the
+IAU2000 projections, and custom PROJ.4 strings can applied with the
 target spatial reference set flag, \texttt{-\/-t\_srs}. If the target
 spatial reference flag is applied with any of the reference spheroid
 options, the reference spheroid option will overwrite the datum
@@ -1172,6 +1279,12 @@ complete documentation is in section \ref{point2dem}.
 \end{minipage}
 \hfill
 \end{figure}
+
+\subsection{Orthorectification of an Image From a Different Source}
+If you have already obtained a DEM, using ASP or some other approach, and have
+an image and camera pair which you would like to overlay on top of this terrain,
+use the \texttt{mapproject} tool (section \ref{mapproject}).
+
 
 % \begin{figure}
 % \begin{center}
@@ -1251,11 +1364,16 @@ fit between MOLA and the CTX model was increased substantially.
 \end{figure}
 
 \begin {verbatim}
-  >  pc_align --max-displacement 200 --datum D_MARS \
+  >  pc_align --max-displacement 200 --datum MOLA   \
        --save-inv-transformed-reference-points      \
-       --csv-format '1:lon 2:lat 3:radius_m'      \
+       --csv-format '1:lon 2:lat 3:radius_m'        \
        stereo-PC.tif mola.csv
 \end{verbatim}
+
+It is important to note here that there are two widely used Mars datums,
+and if your CSV file has, unlike above, the heights relative to a datum,
+the correct datum name must be specified via \texttt{-\/-datum}. Section
+\ref{molacmp} talks in more detail about the Mars datums.
 
 Figure \ref{pc-align-fig} shows an example of using \texttt{pc\_align}.
 The complete documentation for this program is in section
@@ -1335,7 +1453,7 @@ The complete documentation for \texttt{colormap} is in section
 
 Sometimes it may be convenient to see how the DEMs and orthoimages
 generated by ASP look on top of existing imagery in Google Earth. ASP
-provideds a tool named \texttt{image2qtree} for that purpose. It creates
+provides a tool named \texttt{image2qtree} for that purpose. It creates
 multi-resolution image tiles and a metadata tree in KML format that can
 be loaded into Google Earth from your local hard drive or streamed from
 a remote server over the Internet.
@@ -1418,6 +1536,9 @@ during DEM and orthoimage generation with \texttt{point2dem} (section
 \item To get good results if the images lack large-scale features (such
 as for ice plains) use a different way to get the low-resolution
 disparity (section \ref{sparse-disp}).
+
+\item If a run takes unreasonably long, decreasing the timeout parameter
+may be in order (section \ref{longrun}).
 
 \item Manually set the search range if the automated approach fails
 (section \ref{sec:search_range}).

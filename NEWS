@@ -1,35 +1,139 @@
-*** RELEASE 2.4.3, upcoming! ***
+*** RELEASE 2.5.2, upcoming! ***
+
+ - stereo
+    * Bugfix for stereo with map-projected images using the RPC
+      session (e.g, for map-projected Pleiades imagery).
+    * Added OpenCV-based SIFT and ORB interest point finding options.
+    * Added jitter correction for linescan imagery.
+    * If the input images are map-projected (georeferenced) and 
+      alignment method is none, all image outputs of stereo are
+      georeferenced as well, such as GoodPixelMap, D_sub, disparity,
+      etc. As such, all these data can be overlayed in stereo_gui.
+    * The output point cloud saves datum info from input images
+      (even when the inputs are not georeferenced). 
+    * Increased reliability of interest point detection.
+
+ - point2dem, point2las, and pc_align
+   * The datum (-r <planet> or --semi-major-axis) is optional now.
+     The planet will be inferred automatically (together with the
+     projection) from the input images if present. This can be useful
+     for bodies that are not Moon, Mars, or Earth. The datum and
+     projection can still be overridden with --reference-spheroid (or
+     --datum) and --t_srs. 
+  * Accept --datum (-r) MOLA, as a shortcut for the sphere with
+     radius 3,396,000 meters.
+
+ - dem_mosaic
+   * Introduce --priority-blending-length, measured in input pixels. 
+     If positive, keep unmodified values from the earliest available
+     DEM at the current location except a band this wide near its
+     boundary where blending will happen. Meant to be used with 
+     smaller high-resolution "foreground" DEMs and larger
+     lower-resolution "background" DEMs that should be specified later
+     in the list. Changing --weights-exponent can improve transition.
+   * Fix an issue with minor jumps across tiles. 
+   * Introduce --save-dem-weight <index>. Saves the weight image that
+     tracks how much the input DEM with given index contributed to the
+     output mosaic at each pixel (smallest index is 0).
+   * Introduce --save-index-map. For each output pixel, save the
+     index of the input DEM it came from (applicable only for
+     --first, --last, --min, and --max). A text file with the index
+     assigned to each input DEM is saved as well.
+   * Rename --blending-length to --extra-crop-length, for clarity. 
+
+ - dg_mosaic 
+   * Added the switch --fix-seams to use interest point matching
+     to fix seams in the output mosaic due to inconsistencies between
+     image and camera data. Such artifacts may show up in older
+     (2009 or earlier) Digital Globe images.
+
+ - stereo_gui
+   * Added the ability to generate ground control point files for
+     bundle_adjust. In addition to the images to be bundle-adjusted,
+     one should provide a georeferenced image to find the GCP lon-lat,
+     and a reference DEM to find the GCP heights (not fully mature).
+   * Added the option --match-file to view interest point matches.
+   * Added the option --delete-temporary-files-on-exit.
+   * Can read the georeference of map-projected ISIS cubes.
+
+ - point2dem
+   * Respect --t_projwin to the letter. 
+   * Can create simultaneously DEMs at multiple resolutions (by
+     passing multiple values in quotes to --dem-spacing).
+   * Fix minor discrepancies in the minor semi-axis for the WGS84,
+     NAD83 and WGS72 datums. Now using GDAL/OGR for that.
+
+ - point2las
+   * Save the LAS file with a datum if the input PC had one.
+
+ - image_calc
+   * Fix calculation bug when no-data is present.
+
+ - pc_align
+  * Upgraded to the latest libpointmatcher. This may result in minor
+    alignment changes as the core algorithm got modified.
+  * Added the ability to compute a manual rotation + translation +
+    scale transform based on user-selected point correspondences
+    from reference to source cloud in stereo_gui.
+  * Save all PC clouds with datum and projection info, if present. Add
+    comment lines with the datum and projection to CSV files.
+
+ - bundle_adjust
+    * Added OpenCV-based SIFT and ORB interest point finding options.
+ 
+ - geodiff
+   * Bugfix when the two DEMs have longitudes offset by 360 degrees.
+
+ - colormap
+   * Default style is binary-red-blue. Works better than jet when 
+     data goes out of range.
+
+ - pc_merge
+   * Can merge clouds with 1 band. That is, can merge not only PC.tif
+     files but also L.tif files, with the goal of using these two
+     merged datasets to create a merged orthoimage with point2dem.
+
+ - point2mesh
+   * Can create a mesh from a DEM and an orthoimage (DRG file).
+
+*** RELEASE 2.5.0, August 31, 2015 ***
 
 -  Improved speed, coverage, and accuracy for areas with steep slopes
-   for ISIS, RPC and Pinhole cameras by implementing stereo using images 
-   map-projected onto an existing DEM (functionality previously available
-   only for Digital Globe images). Documentation has been added about
-   how to use this mode. 
+   for ISIS, RPC and Pinhole cameras by implementing stereo using
+   images map-projected onto an existing DEM. This mapprojection is
+   multi-process and hence much faster than cam2map. This
+   functionality was previously available only for Digital Globe
+   images.
 
  - New tools
-    * Added stereo_gui, a GUI front-end. Features:
-      - Show several extremely large images side by side.
+
+    * Added stereo_gui, an image viewer and GUI front-end. Features:
+      - View extremely large images using a pyramid approach.
       - If invoked with the same interface as stereo, can run stereo on 
         selected clips.
-      - Load images with int and float pixels, including ISIS cubes, DEMs,
-        NTF, TIF, and other formats, also RGB images.
-      - Can superimpose goereferenced images and can toggle individual
+      - Load images with int, float, and RGB pixels, including ISIS
+        cubes, DEMs, NTF, TIF, and other formats.
+      - Can overlay goereferenced images and can toggle individual
         images on and off (like Google Earth).
+      - Show images side-by-side, as tiles on grid, or on top of each other.
+      - Create and view hillshaded DEMs.
       - View/add/delete interest points.
       - Create shadow thresholds by clicking on shadow pixels (needed
         for sfs).
       - Based on Michael Broxton's vwv tool. 
 
+   * Added sfs, a tool to refine DEMs using shape-from-shading. Can
+     optimize the DEM, albedo per pixel, image exposures and camera
+     positions and orientations using a multi-resolution pyramid
+     approach. Can handle shadows. Tested with LRO NAC lunar images at
+     low latitudes and toward poles. It works only with ISIS images.
    * Added image_calc, a tool for performing simple per-pixel arithmetic
      operations on one or more images.
-   * Added pc_merge, a simple tool for concatenating ASP produced
-     point clouds.
+   * Added pc_merge, a tool for concatenating ASP-produced point clouds.
    * Added pansharp, a tool to apply a pansharp algorithm to a matched
      grayscale image and a low resolution color image.
-   * Added datum_convert, a tool to transform a projected image to a
-     different datum.
-   * Added sfs, a tool to refine DEMs using shape-from-shading. It works
-     only with ISIS images.
+   * Added datum_convert, a tool to transform a DEM to a different
+     datum (e.g., NAD27 to WGS84).
    * Added geodiff, a tool for taking the (absolute) difference of two 
      DEMs.
    * Documented the colormap tool. Added a new colormap option based 
@@ -57,6 +161,8 @@
    * Bugfix, remove outliers during search range determination.
    * Added the option --ip-per-tile, to search for more interest points 
      if the default is insufficient.
+   * If the input images are georeferenced, the good pixel map will be
+     written with a georeference.
  
  - point2dem
    * Fixed a slight discrepancy in the value of the semi-minor axis in
@@ -91,6 +197,7 @@
      DEM is declared to be the closest point. This is more accurate
      than the original implementation for coarse DEMs. The old 
      approach is available using the --no-dem-distances flag.
+   * Fix a bug with a 360 degree longitude offset.
 
  - point2las
    * Added the ability to specify a custom projection (PROJ.4 string)
@@ -108,11 +215,11 @@
    * Added the ability to fill holes in the output mosaic.
 
  - bundle_adjust
+    * Added new parameters, --ip-per-tile and --min-triangulation-angle.
     * Bug fix in handling situations when a point cannot get projected
       into the camera.
     * Bug fix in the camera adjustment logic. Any .adjust files may 
       need to be regenerated.
-    * Added new parameters, --ip-per-tile and --min-triangulation-angle.
 
  - image2qtree
    * Bug fixes.
@@ -132,9 +239,10 @@
      RPC model from a DG model.
    * Handle the situation when two images to be mosaicked start at the 
      same output row number.
+   * Added --target-resolution option to specify the output resolution in meters.
 
  - Misc.
-   * Upgraded to ISIS 3.4.9.6185.
+   * Upgraded to ISIS 3.4.10.
    * Oldest supported OSX version is 10.8.
    * Added documentation for image2qtree and hillshade.
 

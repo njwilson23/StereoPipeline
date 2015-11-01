@@ -29,10 +29,13 @@
 
 //VisionWorkbench & ASP
 #include <vw/Image/Transform.h>
+#include <vw/Cartography/PointImageManipulation.h>
+#include <vw/Image/MaskViews.h>
 #include <asp/Core/PointUtils.h>
 #include <asp/Core/Macros.h>
 #include <asp/Core/Common.h>
 using namespace vw;
+using namespace vw::cartography;
 namespace po = boost::program_options;
 
 //OpenSceneGraph
@@ -83,7 +86,7 @@ struct Options : asp::BaseOptions {
   double phi_rot, omega_rot, kappa_rot;
   bool center, enable_lighting, smooth_mesh, simplify_mesh;
   std::string osg_version;
-  
+
   // Output
   std::string output_prefix, output_file_type;
 };
@@ -476,9 +479,9 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
     opt.output_prefix =
       asp::prefix_from_pointcloud_filename( opt.pointcloud_filename );
 
-  // Create the output directory 
-  asp::create_out_dir(opt.output_prefix);
-  
+  // Create the output directory
+  vw::create_out_dir(opt.output_prefix);
+
   // Turn on logging to file
   asp::log_to_file(argc, argv, "", opt.output_prefix);
 
@@ -500,8 +503,27 @@ int main( int argc, char *argv[] ){
   try {
     handle_arguments( argc, argv, opt );
 
+    std::string input_file = opt.pointcloud_filename;
+    int num_channels = get_num_channels(input_file);
+    GeoReference georef;
+    bool has_georef = read_georeference(georef, input_file);
+    double nodata_val = -std::numeric_limits<double>::max();
+    vw::read_nodata_val(input_file, nodata_val);
+
     // Loading point cloud
-    ImageViewRef<Vector3> point_image = asp::read_asp_point_cloud<3>(opt.pointcloud_filename);
+    ImageViewRef<Vector3> point_image;
+    if (num_channels == 1 && has_georef) {
+      // The input is a DEM. Convert it to a point cloud.
+      DiskImageView<double> dem(input_file);
+      point_image = geodetic_to_cartesian(dem_to_geodetic
+                                          (create_mask(dem, nodata_val), georef),
+                                          georef.datum());
+    }else if (num_channels >= 3){
+      // The input DEM is a point cloud
+      point_image = asp::read_asp_point_cloud<3>(input_file);
+    }else{
+      vw_throw( ArgumentErr() << "The input must be a point cloud or a DEM.\n");
+    }
 
     // Centering Option (helpful if you are experiencing round-off error...)
     if (opt.center) {

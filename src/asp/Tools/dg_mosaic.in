@@ -85,6 +85,27 @@ class Usage(Exception):
     def __init__(self, msg):
         self.msg = msg
 
+# TODO: Move this function into the utils file
+def lonlat_point_distance(pt1, pt2):
+    '''Computes the great circle distance in meters between two lonlat coordinates'''
+
+    # This function uses a simple, less accurate calculation.
+
+    PI           =  3.141592653589793
+    EARTH_RADIUS = 6371.009 # In km
+    DEG2RAD      = PI / 180.0
+
+    lon1  = pt1[0] * DEG2RAD
+    lon2  = pt2[0] * DEG2RAD
+    lat1  = pt1[1] * DEG2RAD
+    lat2  = pt2[1] * DEG2RAD
+    theta = lon2 - lon1
+    dist  = math.acos(math.sin(lat1) * math.sin(lat2) + math.cos(lat1) * math.cos(lat2) * math.cos(theta))
+    if (dist < 0):
+        dist = dist + PI
+    dist = dist * EARTH_RADIUS
+    return dist * 1000.0 # Convert km to meters
+
 # We assume that the boxes are products of closed intervals, [a, b] x
 # [c, d]. As such, the box [0, 0] x [0, 0] of width 0 is not empty.
 class BBox:
@@ -306,6 +327,35 @@ def find_bands(node):
 
     return bands
 
+def read_corners(band):
+    '''Read in the corners from a DG XML file from one band.
+       The points are stored in clockwise order from the upper left.'''
+
+    llbox = BBox()
+    ll_corners = []
+
+    ullon = float(band.find("ULLON").text)
+    ullat = float(band.find("ULLAT").text)
+    llbox.add_point([ullon, ullat])
+    ll_corners.append([ullon, ullat])
+
+    urlon = float(band.find("URLON").text)
+    urlat = float(band.find("URLAT").text)
+    llbox.add_point([urlon, urlat])
+    ll_corners.append([urlon, urlat])
+
+    lrlon = float(band.find("LRLON").text)
+    lrlat = float(band.find("LRLAT").text)
+    llbox.add_point([lrlon, lrlat])
+    ll_corners.append([lrlon, lrlat])
+
+    lllon = float(band.find("LLLON").text)
+    lllat = float(band.find("LLLAT").text)
+    llbox.add_point([lllon, lllat])
+    ll_corners.append([lllon, lllat])
+
+    return (llbox, ll_corners)
+
 # Provide the image files that make up the composite. We assume the XML
 # files are in the same directory and end with extension ".xml" or ".XML".
 def read_xml( filename, options):
@@ -359,29 +409,12 @@ def read_xml( filename, options):
       # code blocks must be kept consistent.
       # Verify that all bands have the same corners
       try:
-          ll_corners_curr = []
-          ullon = float(band.find("ULLON").text)
-          ullat = float(band.find("ULLAT").text)
-          llbox.add_point([ullon, ullat])
-          ll_corners_curr.append([ullon, ullat])
+          ll_box_curr, ll_corners_curr =  read_corners(band)
+          for i in range(0,4):
+              llbox.add_point( [ll_corners_curr[i][0], ll_corners_curr[i][1]] )
 
-          urlon = float(band.find("URLON").text)
-          urlat = float(band.find("URLAT").text)
-          llbox.add_point([urlon, urlat])
-          ll_corners_curr.append([urlon, urlat])
-
-          lrlon = float(band.find("LRLON").text)
-          lrlat = float(band.find("LRLAT").text)
-          llbox.add_point([lrlon, lrlat])
-          ll_corners_curr.append([lrlon, lrlat])
-
-          lllon = float(band.find("LLLON").text)
-          lllat = float(band.find("LLLAT").text)
-          llbox.add_point([lllon, lllat])
-          ll_corners_curr.append([lllon, lllat])
       except Exception, e:
-          print("Warning: File " + filename
-                + " lacks longitude/latitude information.")
+          print("Warning: File " + filename + " lacks longitude/latitude information.")
 
       if len(ll_corners) == 0:
           ll_corners = ll_corners_curr
@@ -465,6 +498,34 @@ def xml_name( filename ):
 
     return xml_file
 
+
+def estimate_ground_resolution( xml_tree ):
+    '''Parse the DG XML file to estimate the ground resolution in meters per pixel'''
+
+    # Retrieve the image size and the four corners from the XML file
+    root = xml_tree.getroot()
+    imd  = root.find("IMD")
+    num_cols = float(imd.find("NUMCOLUMNS").text)
+    num_rows = float(imd.find("NUMROWS").text)
+
+    bands = find_bands(imd)
+    band  = bands[0]
+    ll_box, ll_corners = read_corners(band)
+
+    # Estimate meters per pixel in the X and Y directions of the image.
+    top_dist   = lonlat_point_distance(ll_corners[0], ll_corners[1])
+    bot_dist   = lonlat_point_distance(ll_corners[2], ll_corners[3])
+    left_dist  = lonlat_point_distance(ll_corners[3], ll_corners[0])
+    right_dist = lonlat_point_distance(ll_corners[1], ll_corners[2])
+
+    x_dist     = (top_dist  + bot_dist  ) / 2.0
+    y_dist     = (left_dist + right_dist) / 2.0
+    gsd_x      = x_dist / num_cols
+    gsd_y      = y_dist / num_rows
+
+    # Just take the average of the two sizes
+    return (gsd_x + gsd_y) / 2.0
+
 def run_cmd( cmd, options ):
     if options.dryrun or options.verbose: print cmd
     if options.dryrun: return
@@ -491,6 +552,36 @@ def listlist_to_str(listlist):
             ans += str(val) + " "
     return ans
 
+def examine_discrepancy_in_arrays(A, B):
+
+    if len(A) != len(B):
+        raise Exception('InputError', 'Cannot process arrays of different lengths.')
+
+    max_err = 1.0e-10
+    print("Will go on if the relative discrepancies are less than %g." % max_err)
+
+    num_messages = 0
+    max_num_messages = 10
+    for i in range(len(A)):
+        if A[i] != B[i]:
+            a=float(A[i])
+            b=float(B[i])
+            if a != b:
+                err = abs( (a-b)/a )
+                num_messages = num_messages + 1
+
+                if err > max_err or num_messages < max_num_messages:
+                    print("Warning: Disagreeing values and relative error: %0.18g %0.18g %0.18g" \
+                      % (a, b, err))
+
+                if num_messages == max_num_messages:
+                    print("Will stop printing more warnings.")
+
+                if err > max_err:
+                    raise Exception('InputError',
+                                    'Discrepancy is too large. Cannot continue.')
+
+
 def main():
 
     try:
@@ -503,14 +594,17 @@ def main():
             parser.set_defaults(dryrun=False)
             parser.set_defaults(preview=False)
             parser.set_defaults(gdaldir="")
+            parser.set_defaults(target_resolution=-1.0)
             parser.set_defaults(reduce_percent=100.0)
             parser.set_defaults(output_prefix="")
             parser.set_defaults(band=0)
             parser.set_defaults(input_nodata_value=None)
             parser.set_defaults(output_nodata_value=None)
+            parser.add_option("--target_resolution", dest="target_resolution", type="float",
+                              help="Choose the output resolution in meters per pixel on the ground (note that a coarse resolution may result in aliasing).")
             parser.add_option("--reduce-percent", dest="reduce_percent", type="float",
                               help="Render a reduced resolution image and xml based on this percentage.")
-            parser.add_option("--output-prefix", dest="output_prefix", type="str",
+            parser.add_option("-o", "--output-prefix", dest="output_prefix", type="str",
                               help="The prefix for the output .tif and .xml files.")
             parser.add_option("--band", dest="band", type="int",
                               help="Which band to use (for multi-spectral images).")
@@ -518,31 +612,35 @@ def main():
                               help="Nodata value to use on input; input pixel values less than or equal to this are considered invalid.")
             parser.add_option("--output-nodata-value", dest="output_nodata_value", type="float",
                               help="Nodata value to use on output.")
-            parser.add_option('--skip-rpc-gen', dest='skip_rpc_gen', default=False,
-                              action='store_true', help="Skip RPC model generation")
             parser.add_option("--rpc-penalty-weight", dest="penalty_weight", type="float",
                               default=0.01,
                               help="The weight to use to penalize higher order RPC coefficients when generating the combined RPC model. Higher penalty weight results in smaller such coefficients.")
+            parser.add_option('--fix-seams', dest='fix_seams', default=False,
+                              action='store_true', help="Fix seams in the output mosaic due to inconsistencies between image and camera data using interest point matching.")
             parser.add_option("--preview", dest="preview",
                               action="store_true",
                               help="Render a small 8 bit png of the input for preview.")
+            parser.add_option("-v", "--verbose", dest="verbose",
+                              action="store_true", help="Increase verbosity.")
             parser.add_option("-n", "--dry-run", dest="dryrun",
                               action="store_true",
                               help="Make the calculations, but just print out the commands.")
-            parser.add_option("-v", "--verbose", dest="verbose",
-                              action="store_true", help="Increase verbosity.")
+            parser.add_option('--skip-rpc-gen', dest='skip_rpc_gen', default=False,
+                              action='store_true', help="Skip RPC model generation")
+            parser.add_option('--skip-tif-gen', dest='skip_tif_gen', default=False,
+                              action='store_true', help="Skip TIF file generation.")
             # This option is obsolete. We now ship gdal_translate with ASP.
             parser.add_option("--gdal-dir", dest="gdaldir", help=optparse.SUPPRESS_HELP)
-            # Debug option. Skip the part where we create the tif file,
-            # that is quite time-consuming.
-            parser.add_option('--skip-tif-gen', dest='skip_tif_gen', default=False,
-                              action='store_true', help=optparse.SUPPRESS_HELP)
 
             (options, args) = parser.parse_args()
 
             # Transform 50.0 into just 50
             if options.reduce_percent == int(options.reduce_percent):
                 options.reduce_percent = int(options.reduce_percent)
+
+            # Quit if the user provided conflicting resolution options
+            if (options.reduce_percent != 100) and (options.target_resolution > 0):
+                die('\nERROR: Cannot specify both --reduce-percent and --target-resolution!')
 
             if not args:
                 parser.print_help()
@@ -618,12 +716,29 @@ def main():
                 if ref_pd != pd:
                     raise Exception('InputError', 'Must have the same pd in: '
                                     + xml_name(args[0]) + ' ' + xml_name(filename) )
+
+                if len(ref_eph_list) != len(eph_list):
+                    raise Exception('InputError', 'Must have the same number of ephem values in: '
+                                    + xml_name(args[0]) + ' and ' + xml_name(filename) )
+
                 if ref_eph_list != eph_list:
-                    raise Exception('InputError', 'Must have the same ephem in: '
-                                    + xml_name(args[0]) + ' ' + xml_name(filename) )
+                    # Normally we'd expect the same ephh in all files, as after all,
+                    # they are components of the same observation. Oddly, in practice
+                    # that is not always so. Print a warning if the discrepancies are
+                    # minor, and thow an error if they are major.
+                    print("Warning: ephem values must be identical in " \
+                          + xml_name(args[0]) + ' and ' + xml_name(filename))
+                    examine_discrepancy_in_arrays(ref_eph_list, eph_list)
+
+                if len(ref_att_list) != len(att_list):
+                    raise Exception('InputError', 'Must have the same number of att values in: '
+                                    + xml_name(args[0]) + ' and ' + xml_name(filename) )
+
                 if ref_att_list != att_list:
-                    raise Exception('InputError', 'Must have the same att in: '
-                                    + xml_name(args[0]) + ' ' + xml_name(filename) )
+                    # Same thing as for ephem.
+                    print("Warning: att values must be identical in " \
+                          + xml_name(args[0]) + ' and ' + xml_name(filename))
+                    examine_discrepancy_in_arrays(ref_att_list, att_list)
 
                 orig_sizes.append(image_size)
 
@@ -690,7 +805,13 @@ def main():
                                 'XML file or invalid TLC information.')
             seen.add(val)
 
-        scale = options.reduce_percent / 100.0
+        if options.target_resolution > 0:
+            # Compute the reduce percentage based on GSD
+            current_gsd = estimate_ground_resolution(ET.parse(xml_name(args[0])))
+            options.reduce_percent = (current_gsd / options.target_resolution) * 100
+
+        # Compute scale factor for adjusting XML values
+        scale  = options.reduce_percent / 100.0
         suffix = ".r" + str(options.reduce_percent)
 
         # The band to output
@@ -803,8 +924,8 @@ def main():
         # Scale the RPC model
         if not options.skip_rpc_gen:
             RPI = root.find("RPB").find("IMAGE")
-            scale_xml_element(RPI.find("SAMPSCALE"), scale)
-            scale_xml_element(RPI.find("LINESCALE"), scale)
+            scale_xml_element(RPI.find("SAMPSCALE" ), scale)
+            scale_xml_element(RPI.find("LINESCALE" ), scale)
             scale_xml_element(RPI.find("SAMPOFFSET"), scale)
             scale_xml_element(RPI.find("LINEOFFSET"), scale)
 
@@ -840,6 +961,9 @@ def main():
                 mosaic_args += ['--input-nodata-value', str(options.input_nodata_value)]
             if options.output_nodata_value is not None:
                 mosaic_args += ['--output-nodata-value', str(options.output_nodata_value)]
+            if options.fix_seams:
+                mosaic_args += ['--fix-seams']
+
             print "Writing: " + tif_file
             run_and_parse_output( mosaic_cmd, mosaic_args, sep,
                                   options.verbose )

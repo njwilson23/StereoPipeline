@@ -151,7 +151,7 @@ namespace asp{
     }
 
   }; // End class CsvReader
-  
+
 
   /// Create a point cloud image from a las file. The image will be
   /// created block by block, when it needs to be written to disk. It is
@@ -159,9 +159,9 @@ namespace asp{
   /// as we read from the las file sequentially.
   template <class ImageT>
   class LasOrCsvToTif_Class : public ImageViewBase< LasOrCsvToTif_Class<ImageT> > {
-    
+
     typedef typename ImageT::pixel_type PixelT;
-    
+
     asp::BaseReader * m_reader;
     int m_rows, m_cols; // These are pixel sizes, not tile counts.
     int m_block_size;
@@ -178,7 +178,7 @@ namespace asp{
       boost::uint64_t num_points = m_reader->m_num_points;
       int num_row_tiles = std::max(1, (int)ceil(double(num_rows)/tile_len));
       m_rows = tile_len*num_row_tiles;
-      
+
       int points_per_row = (int)ceil(double(num_points)/m_rows);
       int num_col_tiles  = std::max(1, (int)ceil(double(points_per_row)/tile_len));
       m_cols = tile_len*num_col_tiles;
@@ -215,7 +215,7 @@ namespace asp{
       while (m_reader->ReadNextPoint()){
         in.push_back(m_reader->GetPoint());
         count++;
-        if (count >= max_num_pts_to_read) 
+        if (count >= max_num_pts_to_read)
           break;
       }
 
@@ -248,7 +248,7 @@ void asp::CsvConv::parse_csv_format(std::string const& csv_format_str,
   // Parse the CSV format string and build the data structure which
   // will enable to convert from CSV to Cartesian and vice-versa.
 
-  // Make sure that these custom turms do not appear in the proj4 string.
+  // Make sure that these custom terms do not appear in the proj4 string.
   if ((csv_proj4_str.find("D_MOON") != std::string::npos) ||
       (csv_proj4_str.find("D_MARS") != std::string::npos)   ) {
     vw_throw(ArgumentErr() << "D_MOON and D_MARS are not official proj4 names."
@@ -263,7 +263,7 @@ void asp::CsvConv::parse_csv_format(std::string const& csv_format_str,
   std::string local = csv_format_str;
   boost::algorithm::to_lower(local);
 
-  if (local == "") 
+  if (local == "")
     return;
 
   boost::replace_all(local, ":", " ");
@@ -349,18 +349,16 @@ void asp::CsvConv::parse_csv_format(std::string const& csv_format_str,
   }
 }
 
-void asp::CsvConv::configure_georef(vw::cartography::GeoReference & georef) const {
+bool asp::CsvConv::parse_georef(vw::cartography::GeoReference & georef) const {
   // If the user passed in a csv file containing easting, northing, height
   // above datum, and either a utm zone or a custom proj4 string,
   // pass that info into the georeference for the purpose of converting
   // later from easting and northing to lon and lat.
 
-  //if (this->format != EASTING_HEIGHT_NORTHING)
-  //  return; // nothing to do
-
   if (this->utm_zone >= 0) { // UTM case
     try{
       georef.set_UTM(this->utm_zone, this->utm_north);
+      return true;
     } catch ( const std::exception& e ) {
       vw_throw(ArgumentErr() << "Detected error: " << e.what()
                              << "\nPlease check if you are using an Earth datum.\n");
@@ -369,11 +367,12 @@ void asp::CsvConv::configure_georef(vw::cartography::GeoReference & georef) cons
     bool have_user_datum = false;
     Datum user_datum;
     asp::set_srs_string(this->csv_proj4_str, have_user_datum, user_datum, georef);
-
+    return true;
   }else{ // No UTM, no proj4 string
     if (this->format == EASTING_HEIGHT_NORTHING)
       vw_throw( ArgumentErr() << "When a CSV file has easting and northing, the PROJ.4 string must be set via --csv_proj4.\n" );
   }
+  return false;
 }
 
 vw::Vector3 asp::CsvConv::parse_csv_line(bool & is_first_line, bool & success,
@@ -401,7 +400,7 @@ vw::Vector3 asp::CsvConv::parse_csv_line(bool & is_first_line, bool & success,
     if ( num_read >= 3 ) break; // read enough numbers
 
     // Look only at indices we are supposed to read
-    if (this->col2name.find(col_index) == this->col2name.end()) 
+    if (this->col2name.find(col_index) == this->col2name.end())
       continue;
 
     double val;
@@ -414,7 +413,7 @@ vw::Vector3 asp::CsvConv::parse_csv_line(bool & is_first_line, bool & success,
     num_read++;
   }
 
-  if (num_read != (int)vals.size()) 
+  if (num_read != (int)vals.size())
     success = false;
 
   // Be prepared for the fact that the first line may be the header.
@@ -464,7 +463,7 @@ Vector3 asp::CsvConv::csv_to_cartesian_or_point_height(Vector3 const& csv,
   }else if (this->format == HEIGHT_LAT_LON){
 
     std::swap(ordered_csv[0], ordered_csv[2]); // now lon, lat, height
-    if (return_point_height) 
+    if (return_point_height)
       return ordered_csv;
 
     xyz = geo.datum().geodetic_to_cartesian(ordered_csv);
@@ -482,7 +481,7 @@ Vector3 asp::CsvConv::csv_to_cartesian_or_point_height(Vector3 const& csv,
     // Update the radius
     xyz = ordered_csv[2]*(xyz/norm_2(xyz));
 
-    if (return_point_height) 
+    if (return_point_height)
       return geo.datum().cartesian_to_geodetic(xyz);
   }
   return xyz;
@@ -543,9 +542,6 @@ Vector3 asp::CsvConv::cartesian_to_csv(Vector3 const& xyz,
 
 // End class CsvConv functions
 //------------------------------------------------------------------------------------------
-
-
-
 
 void asp::las_or_csv_to_tif(std::string const& in_file,
                             std::string const& out_file,
@@ -637,19 +633,26 @@ bool asp::georef_from_las(std::string const& las_file,
   return true;
 }
 
-bool asp::georef_from_las(std::vector<std::string> const& files,
-                          vw::cartography::GeoReference & georef){
-
-  // Get the georeference from the first las file
+/// Builds a GeoReference from the first cloud having a georeference in the list
+bool asp::georef_from_pc_files(std::vector<std::string> const& files,
+			       vw::cartography::GeoReference & georef){
 
   // Initialize
   georef = GeoReference();
 
   for (int i = 0; i < (int)files.size(); i++){
     GeoReference local_georef;
-    if (!is_las(files[i])) 
-      continue;
-    if (asp::georef_from_las(files[i], local_georef)){
+
+    // Sometimes ASP PC files can have georef, written there by stereo
+    try {
+      if (!is_las(files[i]) && read_georeference(local_georef, files[i])){
+	georef = local_georef;
+	return true;
+      }
+    }catch(...){}
+
+    // Sometimes las files can have georef
+    if (is_las(files[i]) && asp::georef_from_las(files[i], local_georef)){
       georef = local_georef;
       return true;
     }
@@ -675,24 +678,8 @@ bool asp::read_user_datum(double semi_major, double semi_minor,
   // Select a cartographic datum. There are several hard coded datums
   // that can be used here, or the user can specify their own.
   if ( reference_spheroid != "" ) {
-    if (reference_spheroid == "mars") {
-      datum.set_well_known_datum("D_MARS");
-      vw_out() << "\t--> Re-referencing altitude values using a Mars spheroid\n";
-    } else if (reference_spheroid == "moon") {
-      datum.set_well_known_datum("D_MOON");
-      vw_out() << "\t--> Re-referencing altitude values using a Lunar spheroid\n";
-    } else if (reference_spheroid == "earth") {
-      vw_out() << "\t--> Re-referencing altitude values using the Earth WGS84 spheroid\n";
-    } else {
-      vw_throw( ArgumentErr() << "\t--> Unknown reference spheriod: "
-                << reference_spheroid
-                << ". Current options are [Earth, Moon, Mars].\nExiting." );
-    }
-    vw_out() << "\t    Axes [" << datum.semi_major_axis() << " "
-             << datum.semi_minor_axis() << "] meters\n";
+    datum.set_well_known_datum(reference_spheroid);
   } else if (semi_major > 0 && semi_minor > 0) {
-    vw_out() << "\t--> Re-referencing altitude values to user supplied datum.\n"
-             << "\t    Semi-major: " << semi_major << "  Semi-minor: " << semi_minor << "\n";
     datum = cartography::Datum("User Specified Datum",
                                "User Specified Spheroid",
                                "Reference Meridian",
@@ -700,6 +687,9 @@ bool asp::read_user_datum(double semi_major, double semi_minor,
   } else {
     return false;
   }
+  vw_out() << "\t--> Re-referencing altitude values using datum: " << datum.name() << ".\n";
+  vw_out() << "\t    Axes [" << datum.semi_major_axis() << " "
+           << datum.semi_minor_axis() << "] meters.\n";
   return true;
 }
 

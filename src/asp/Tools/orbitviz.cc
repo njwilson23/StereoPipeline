@@ -27,12 +27,9 @@
 #include <vw/FileIO/KML.h>
 #include <vw/Camera.h>
 #include <vw/Cartography.h>
-using namespace vw;
-using namespace vw::camera;
-using namespace vw::cartography;
 
 #include <asp/Core/Macros.h>
-#include <asp/Sessions.h>
+#include <asp/Sessions/StereoSessionFactory.h>
 
 #if defined(ASP_HAVE_PKG_ISISIO) && ASP_HAVE_PKG_ISISIO == 1
 #include <asp/IsisIO/IsisCameraModel.h>
@@ -46,6 +43,9 @@ using namespace vw::cartography;
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/fstream.hpp>
+using namespace vw;
+using namespace vw::camera;
+using namespace vw::cartography;
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
 

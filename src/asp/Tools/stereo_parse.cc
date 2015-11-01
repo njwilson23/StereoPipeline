@@ -21,10 +21,13 @@
 /// This program is to allow python access to stereo settings.
 
 #include <asp/Tools/stereo.h>
+#include <vw/Stereo/DisparityMap.h>
+#include <asp/Sessions/StereoSession.h>
 
 using namespace vw;
 using namespace asp;
 using namespace std;
+namespace fs = boost::filesystem;
 
 int main( int argc, char* argv[] ) {
 
@@ -39,6 +42,9 @@ int main( int argc, char* argv[] ) {
     string output_prefix;
     asp::parse_multiview(argc, argv, TriangulationDescription(),
                          verbose, output_prefix, opt_vec);
+    if (opt_vec.empty())
+      return 1;
+
     Options opt = opt_vec[0];
 
     vw_out() << "in_file1,"        << opt.in_file1        << endl;
@@ -73,6 +79,17 @@ int main( int argc, char* argv[] ) {
       trans_left_image_size = file_image_size(trans_left_image);
     vw_out() << "trans_left_image_size," << trans_left_image_size.x() << "," << trans_left_image_size.y() << endl;
 
+    cartography::GeoReference georef = opt.session->get_georef();
+    vw_out() << "WKT--non-comma-separator--" << georef.get_wkt() << std::endl;
+
+    // Write the geotransform as a string as expected by GDAL's vrt xml format
+    // TODO: Not sure if this will be useful as a member function in GeoReference.
+    Matrix3x3 T = georef.transform();
+    std::ostringstream os;
+    os.precision(18);
+    os << " "  << T(0, 2) << ",  " << T(0, 0) << ",  " << T(0, 1) << ",  "
+       << " "  << T(1, 2) << ",  " << T(1, 0) << ",  " << T(1, 1);
+    vw_out() << "GeoTransform--non-comma-separator--" << os.str() << std::endl;
 
     // Some care is needed below. The transformed_window will be used
     // by parallel_stereo to parallelize stereo on a given user-specified
@@ -102,6 +119,49 @@ int main( int argc, char* argv[] ) {
     vw_out() << "corr_tile_size," << Options::corr_tile_size() << endl;
     vw_out() << "rfne_tile_size," << Options::rfne_tile_size() << endl;
     vw_out() << "tri_tile_size,"  << Options::tri_tile_size()  << endl;
+
+    // This block of code should be in its own executable but I am
+    // reluctant to create one just for it. This functionality will be
+    // invoked after low-res disparity is computed, whether done in
+    // C++ or in Python. It will attach a georeference to this
+    // disparity.
+    std::string left_image_file = opt.out_prefix + "-L.tif";
+    if (stereo_settings().attach_georeference_to_lowres_disparity &&
+        fs::exists(left_image_file) ) {
+
+      cartography::GeoReference left_georef, left_sub_georef;
+      bool has_left_georef = read_georeference(left_georef, left_image_file);
+      bool has_nodata = false;
+      double output_nodata = -32768.0;
+      if (has_left_georef) {
+
+	DiskImageView<float> left_image(left_image_file);
+	for (int i = 0; i < 2; i++) {
+	  std::string d_sub_file = opt.out_prefix + "-D_sub.tif";
+	  if (i == 1) d_sub_file = opt.out_prefix + "-D_sub_spread.tif";
+	  if (!fs::exists(d_sub_file)) continue;
+
+          bool has_sub_georef = read_georeference(left_sub_georef, d_sub_file);
+          if (has_sub_georef) {
+            // If D_sub already has a georef, as with seed-mode 3, don't
+            // overwrite it.
+            continue;
+          }
+
+          ImageView<PixelMask<Vector2i> > d_sub;
+          read_image(d_sub, d_sub_file);
+	    // Account for scale.
+          double left_scale = 0.5*( double(d_sub.cols())/left_image.cols()
+                                    + double(d_sub.rows())/left_image.rows());
+          left_sub_georef = resample(left_georef, left_scale);
+          asp::block_write_gdal_image(d_sub_file, d_sub,
+                                      has_left_georef, left_sub_georef,
+                                      has_nodata, output_nodata,
+                                      opt, TerminalProgressCallback("asp", "\t    D_sub: ")
+                                      );
+	}
+      }
+    }
 
   } ASP_STANDARD_CATCHES;
 

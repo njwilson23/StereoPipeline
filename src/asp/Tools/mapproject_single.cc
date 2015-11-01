@@ -24,16 +24,15 @@
 #include <vw/FileIO.h>
 #include <vw/Image.h>
 #include <vw/Cartography.h>
-using namespace vw;
-using namespace vw::cartography;
 
 #include <asp/Core/Macros.h>
 #include <asp/Core/Common.h>
 #include <asp/Camera/DG_XML.h>
-#include <asp/Sessions.h>
-#include <asp/Sessions/StereoSessionDG.h>
-#include <asp/Core/BundleAdjustUtils.h>
+#include <asp/Sessions/StereoSessionFactory.h>
 #include <asp/Core/StereoSettings.h>
+
+using namespace vw;
+using namespace vw::cartography;
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
 
@@ -139,28 +138,24 @@ void write_parallel_cond( std::string              const& filename,
   if (session_type == "pinholemappinhole")
     session_type = "pinhole";
 
+  // Save some keywords that we will check later when using the mapprojected file
   std::map<std::string, std::string> keywords;
-  keywords["CAMERA_MODEL_TYPE" ] = session_type;
+  keywords["CAMERA_MODEL_TYPE" ]    = session_type;
+  std::string prefix = asp::stereo_settings().bundle_adjust_prefix;;
+  if (prefix == "") prefix = "NONE"; // to save the field, need to make it non-empty
+  keywords["BUNDLE_ADJUST_PREFIX" ] = prefix;
+  keywords["DEM_FILE" ]             = opt.dem_file;
+
+  bool has_georef = true;
 
   // ISIS is not thread safe so we must switch out base on what the session is.
-
   vw_out() << "Writing: " << filename << "\n";
-  if (has_nodata){
-    if ( session_type == "isis" ) {
-      asp::write_gdal_image(filename, image.impl(), georef,
-                            nodata_val, opt, tpc, keywords);
-    } else {
-      asp::block_write_gdal_image(filename, image.impl(), georef,
-                                  nodata_val, opt, tpc, keywords);
-    }
-  }else{ // Does not have nodata
-    if ( session_type == "isis" ) {
-      asp::write_gdal_image(filename, image.impl(), georef,
-                            opt, tpc, keywords);
-    } else {
-      asp::block_write_gdal_image(filename, image.impl(), georef,
-                                  opt, tpc, keywords);
-    }
+  if ( session_type == "isis" ) {
+    asp::write_gdal_image(filename, image.impl(), has_georef, georef,
+                          has_nodata, nodata_val, opt, tpc, keywords);
+  } else {
+    asp::block_write_gdal_image(filename, image.impl(), has_georef, georef,
+                                has_nodata, nodata_val, opt, tpc, keywords);
   }
 
 }
@@ -234,7 +229,7 @@ void calc_target_geom(// Inputs
                       boost::shared_ptr<camera::CameraModel> const& camera_model,
                       ImageViewRef<PMaskT> const& dem,
                       GeoReference dem_georef, // make copy on purpose
-                      BBox2  dem_bbox,         // make copy on purpose
+                      BBox2  dem_box,         // make copy on purpose
                       // Outputs
                       Options & opt, BBox2 & cam_box, GeoReference & target_georef){
 
@@ -274,8 +269,9 @@ void calc_target_geom(// Inputs
     opt.target_resolution = auto_res;
 
   // If an image bounding box (projected coordinates) was passed in,
-  //  override the camera's view on the ground with the custom box.
-  // - The user needs to know the georeference projected coordinate system (using the query command) to do this
+  // override the camera's view on the ground with the custom box.
+  // The user needs to know the georeference projected coordinate
+  // system (using the query command) to do this.
   if ( opt.target_projwin != BBox2() ) {
     cam_box = opt.target_projwin;
     if ( cam_box.min().y() > cam_box.max().y() )
@@ -284,10 +280,14 @@ void calc_target_geom(// Inputs
     cam_box.min().y() += opt.target_resolution;
   }
 
-  // Ensure the camera box does not extend beyond the DEM box
-  dem_bbox.max().x() -= opt.target_resolution; //TODO: What are these adjustments?
-  dem_bbox.min().y() += opt.target_resolution;
-  cam_box.crop(dem_bbox);
+  if ( opt.target_projwin == BBox2() ) {
+    // Ensure the camera box does not extend beyond the DEM box.
+    // Apply this only if the user did not explicitly request
+    // a custom proj win.
+    dem_box.max().x() -= opt.target_resolution; //TODO: What are these adjustments?
+    dem_box.min().y() += opt.target_resolution;
+    cam_box.crop(dem_box);
+  }
 
   // In principle the corners of the projection box can be
   // arbitrary.  However, we will force them to be at integer
@@ -435,18 +435,9 @@ int main( int argc, char* argv[] ) {
     // Compute the dem BBox in the output projected space.
     // Here we could have used target_georef.lonlat_to_point_bbox(dem_georef.pixel_to_lonlat_bbox)
     // but that grows the box needlessly big. We will ensure the mapprojected image does
-    // not go beyond dem_bbox.
-    BBox2 dem_bbox;
-    int len = std::max(dem.cols(), dem.rows());
-    for (int i = 0; i <= len; i++) {
-      double r = double(i)/double(std::max(len, 1));
-      // Diagonals of the DEM
-      Vector2i p1 = round(r*Vector2(dem.cols()-1, dem.rows()-1));
-      Vector2i p2 = Vector2i(dem.cols() - 1 - p1[0], p1[1]);
-      dem_bbox.grow(target_georef.lonlat_to_point(dem_georef.pixel_to_lonlat(p1)));
-      dem_bbox.grow(target_georef.lonlat_to_point(dem_georef.pixel_to_lonlat(p2)));
-    }
-
+    // not go beyond dem_box.
+    cartography::GeoTransform T(dem_georef, target_georef);
+    BBox2 dem_box = T.forward_pixel_to_point_bbox(bounding_box(dem));
 
     // We compute the target_georef and camera box in two passes,
     // first in the DEM coordinate system and we rotate it to target's
@@ -459,7 +450,7 @@ int main( int argc, char* argv[] ) {
     bool first_pass = true;
     calc_target_geom(// Inputs
                      first_pass, calc_target_res, image_size, camera_model,
-                     dem, dem_georef, dem_bbox,
+                     dem, dem_georef, dem_box,
                      // Outputs
                      opt, cam_box, target_georef);
     // target_georef is now in the output coordinate system and location!
@@ -479,7 +470,7 @@ int main( int argc, char* argv[] ) {
 
     calc_target_geom(// Inputs
                      first_pass, calc_target_res, image_size, camera_model,
-                     trans_dem, target_georef, dem_bbox,
+                     trans_dem, target_georef, dem_box,
                      // Outputs
                      opt, cam_box, target_georef);
 
@@ -527,7 +518,7 @@ int main( int argc, char* argv[] ) {
     // Write the output image. Use the nodata passed in by the user
     // if it is not available in the input file.
     if (img_rsrc->has_nodata_read()) opt.nodata_value = img_rsrc->nodata_read();
-    asp::create_out_dir(opt.output_file);
+    vw::create_out_dir(opt.output_file);
     bool has_img_nodata = true;
     PMaskT nodata_mask = PMaskT(); // invalid value for a PixelMask
     bool call_from_mapproject = true;

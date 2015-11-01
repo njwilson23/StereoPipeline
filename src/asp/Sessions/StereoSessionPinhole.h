@@ -22,26 +22,18 @@
 #ifndef __STEREO_SESSION_PINHOLE_H__
 #define __STEREO_SESSION_PINHOLE_H__
 
-#include <asp/Sessions/StereoSessionConcrete.h>
+#include <asp/Core/InterestPointMatching.h>
 #include <vw/Stereo/StereoModel.h>
+#include <asp/Sessions/StereoSession.h>
 
 namespace asp {
 
-  class StereoSessionPinhole : public StereoSessionConcrete<DISKTRANSFORM_TYPE_MATRIX_RIGHT, STEREOMODEL_TYPE_PINHOLE>{
+ class StereoSessionPinhole: public StereoSession {
   public:
     StereoSessionPinhole() {}
     virtual ~StereoSessionPinhole() {}
 
     virtual std::string name() const { return "pinhole"; }
-
-    // Specialization for how interest points are found
-    virtual bool ip_matching(std::string const& input_file1,
-                             std::string const& input_file2,
-                             int ip_per_tile,
-                             float nodata1, float nodata2,
-                             std::string const& match_filename,
-                             vw::camera::CameraModel* cam1,
-                             vw::camera::CameraModel* cam2);
 
     // Stage 1: Preprocessing
     //
@@ -55,14 +47,46 @@ namespace asp {
 
     static StereoSession* construct() { return new StereoSessionPinhole; }
 
+    virtual boost::shared_ptr<vw::camera::CameraModel>
+    camera_model(std::string const& image_file,
+                 std::string const& camera_file = "");
+
+    /// Transforms from pixel coordinates on disk to original unwarped image coordinates.
+    /// - For reversing our arithmetic applied in preprocessing.
+    typedef vw::HomographyTransform tx_type;
+    tx_type tx_left () const;
+    tx_type tx_right() const;
+
+    typedef vw::stereo::StereoModel stereo_model_type;
+
+   static bool isMapProjected() { return false; }
+
+   // TODO: Clean these up!
+
+   // Override the base class functions according to the class paramaters
+   virtual bool uses_map_projected_inputs() const {return  isMapProjected();}
+   virtual bool requires_input_dem       () const {return  isMapProjected();}
+   virtual bool supports_image_alignment () const {return !isMapProjected();}
+   virtual bool is_nadir_facing          () const {return false;}
+
  private:
     /// Helper function for determining image alignment.
     /// - Only used in pre_preprocessing_hook()
-    vw::Matrix3x3 determine_image_align( std::string const& out_prefix,
-                                         std::string const& input_file1,
-                                         std::string const& input_file2,
+    vw::Matrix3x3 determine_image_align( std::string  const& out_prefix,
+                                         std::string  const& input_file1,
+                                         std::string  const& input_file2,
+                                         vw::Vector2  const& uncropped_image_size,
+                                         Vector6f const& stats1,
+                                         Vector6f const& stats2,
                                          float nodata1, float nodata2);
-  };
+ };
+
+  // TODO: Move this to a Pinhole loader class
+  boost::shared_ptr<vw::camera::CameraModel>
+  load_adj_pinhole_model(std::string const& image_file, std::string const& camera_file,
+                         std::string const& left_image_file, std::string const& right_image_file,
+                         std::string const& left_camera_file, std::string const& right_camera_file,
+                         std::string const& input_dem);
 
 }
 

@@ -28,6 +28,7 @@
 #include <asp/Tools/stereo.h>
 #include <asp/Camera/RPCModel.h>
 #include <asp/Sessions/StereoSessionFactory.h>
+#include <asp/Core/InterestPointMatching.h>
 
 #include <boost/accumulators/accumulators.hpp>
 #include <boost/accumulators/statistics.hpp>
@@ -106,6 +107,9 @@ namespace asp {
     std::string usage;
     handle_arguments(argc, argv, opt, additional_options,
                      is_multiview, files, usage);
+
+    // Need this for the GUI, ensure that opt_vec is never empty, even on failures
+    opt_vec.push_back(opt);
 
     if (files.size() < 3)
       vw_throw( ArgumentErr() << "Missing all of the correct input files.\n\n" << usage );
@@ -209,6 +213,7 @@ namespace asp {
 
     // Generate the stereo command for each of the pairs made up of the first
     // image and each subsequent image, with corresponding cameras.
+    opt_vec.resize(num_pairs);
     for (int p = 1; p <= num_pairs; p++){
 
       vector<string> cmd;
@@ -251,7 +256,7 @@ namespace asp {
       vector<string> files;
       handle_arguments( largc, &largv[0], opt, additional_options,
                         is_multiview, files, usage);
-      opt_vec.push_back(opt);
+      opt_vec[p-1] = opt;
 
       if (verbose){
         // Needed for stereo_parse
@@ -394,7 +399,7 @@ namespace asp {
     if (!this_is_case3 && opt.cam_file2.empty()) vw_throw(ArgumentErr() << "Missing right camera file");
 
     // Create the output directory
-    asp::create_out_dir(opt.out_prefix);
+    vw::create_out_dir(opt.out_prefix);
 
     // Turn on logging to file
     asp::log_to_file(argc, argv, opt.stereo_default_filename, opt.out_prefix);
@@ -431,8 +436,8 @@ namespace asp {
         stereo_settings().trans_crop_win = transformed_crop_win(opt);
       }
 
+      // Intersect with L.tif which is the transformed and processed left image.
       if ( fs::exists(opt.out_prefix+"-L.tif") ){
-        // Intersect with L.tif which is the transformed and processed left image
         DiskImageView<PixelGray<float> > L_img(opt.out_prefix+"-L.tif");
         stereo_settings().trans_crop_win.crop(bounding_box(L_img));
       }
@@ -445,8 +450,7 @@ namespace asp {
       // images and just restricting the domain of computation.  The
       // trans_crop_win as passed here from parallel_stereo will
       // already be a tile in the cropped image. So we just use it as
-      // it is. If it is not defined, we set it to the entire cropped
-      // image.
+      // it is. If it is not defined, we set it to the entire cropped image.
       if (stereo_settings().trans_crop_win == BBox2i(0, 0, 0, 0)) {
         DiskImageView<PixelGray<float> > left_image(opt.in_file1);
         stereo_settings().trans_crop_win = bounding_box(left_image);
@@ -457,10 +461,13 @@ namespace asp {
       }
     }
 
-    // Sanity check
-    if (stereo_settings().trans_crop_win.width () <= 0 ||
-        stereo_settings().trans_crop_win.height() <= 0 ){
-
+    // Sanity check. Don't run it if we have L-cropped.tif or R-cropped.tif,
+    // in that case we have ran the gui before, and the sizes of the subimages
+    // could be anything. We'll regenerate any of those anyway soon.
+    if ((stereo_settings().trans_crop_win.width () <= 0 ||
+         stereo_settings().trans_crop_win.height() <= 0) &&
+        !fs::exists(opt.out_prefix+"-L-cropped.tif")     &&
+        !fs::exists(opt.out_prefix+"-R-cropped.tif") ){
       vw_throw(ArgumentErr() << "Invalid region for doing stereo.\n\n" << usage << general_options );
     }
 
@@ -560,8 +567,12 @@ namespace asp {
 
     //TODO: Clean up these conditional using some kind of enum system
 
-    // If images are map-projected, need an input DEM
-    if (has_georef1 && has_georef2 && !dem_provided) {
+    // If the images are map-projected, and the cameras are specified
+    // separately from the images, we need an input DEM, as we use the
+    // ASP flow with map-projected images.
+    if (has_georef1 && has_georef2 && !dem_provided &&
+        (opt.cam_file1 != opt.in_file1) && (opt.cam_file2 != opt.in_file2) &&
+        !opt.cam_file1.empty() && !opt.cam_file2.empty() ) {
       vw_out(WarningMessage) << "It appears that the input images are "
                              << "map-projected. In that case a DEM needs to be "
                              << "provided for stereo to give correct results.\n";
@@ -583,11 +594,11 @@ namespace asp {
       vw_out(WarningMessage) << "Changing the alignment method to 'none' "
                              << "as the images are map-projected." << endl;
     }
-    /*
-    TODO: Make sure we check the types at some point!
-    // Ensure that we are not accidentally doing stereo with
-    // images map-projected with other camera model than 'rpc'.
-    if (!opt.input_dem.empty()){
+
+    // Ensure that for dgmaprpc and rpcmaprpc sessions the images were
+    // map-projected using -t rpc. For isismapisis it should have been
+    // isis. Same for pinhole.
+    if (dem_provided){
 
       string cam_tag = "CAMERA_MODEL_TYPE";
       string l_cam_type, r_cam_type;
@@ -596,12 +607,26 @@ namespace asp {
       boost::shared_ptr<vw::DiskImageResource> r_rsrc(new vw::DiskImageResourceGDAL(opt.in_file2));
       vw::cartography::read_header_string(*r_rsrc.get(), cam_tag, r_cam_type);
 
-      if ((l_cam_type != "" && l_cam_type != "rpc") ||
-          (r_cam_type != "" && r_cam_type != "rpc")   ){
-        vw_throw(ArgumentErr() << "The images were map-projected with another option than -t rpc.\n");
+      // Extract the 'rpc' from 'rpcmaprpc' and 'dgmaprc', and 'pinhole' from 'pinholemappinhole'
+      std::string expected_cam_type;
+      std::string sep = "map";
+      std::size_t it = opt.session->name().find(sep);
+      if (it != std::string::npos) {
+        it += sep.size();
+        expected_cam_type = opt.session->name().substr(it, opt.session->name().size());
       }
+
+      if ((l_cam_type != "" && l_cam_type != expected_cam_type) ||
+          (r_cam_type != "" && r_cam_type != expected_cam_type)   ){
+        vw_throw(ArgumentErr() << "For session type "
+                 << opt.session->name()
+                 << ", the images should have been map-projected with "
+                 << "the option -t \"" << expected_cam_type << "\". Instead, got: \""
+                 << l_cam_type << "\" and \"" << r_cam_type << "\".\n");
+      }
+
     }
-*/
+
     if (stereo_settings().corr_kernel[0]%2 == 0 ||
         stereo_settings().corr_kernel[1]%2 == 0   ){
       vw_throw(ArgumentErr() << "The entries of corr-kernel must be odd numbers.\n");
@@ -613,6 +638,7 @@ namespace asp {
     }
 
     // Camera checks
+    bool force_throw = false;
     try {
       boost::shared_ptr<camera::CameraModel> camera_model1, camera_model2;
       opt.session->camera_models(camera_model1, camera_model2);
@@ -654,12 +680,48 @@ namespace asp {
           << "\tyour input models as most likely stereo won't\n"
           << "\tbe able to triangulate.\n";
       }
+
+      // If later we perform piecewise adjustments, the cameras loaded
+      // so far must not be adjusted. And we also can't just perform
+      // stereo on cropped images, as we need the full disparity.
+      if (stereo_settings().image_lines_per_piecewise_adjustment > 0) {
+
+        force_throw = true;
+
+        if ( opt.session->name() != "dg" && opt.session->name() != "dgmaprpc")
+          vw_throw(ArgumentErr()
+                   << "Piecewise adjustment is possible only for Digital Globe cameras.\n");
+
+        // This check must come first as it implies adjusted cameras
+        if ( ( stereo_settings().left_image_crop_win  != BBox2i(0, 0, 0, 0)) &&
+             ( stereo_settings().right_image_crop_win != BBox2i(0, 0, 0, 0) ) )
+          vw_throw(ArgumentErr() << "Since we perform piecewise adjustments we "
+                   << "need the full disparities, so --left-image-crop-win and  "
+                   << "--right-image-crop-win cannot be used.\n");
+
+        if (stereo_settings().bundle_adjust_prefix != "" ||
+            dynamic_cast<vw::camera::AdjustedCameraModel*>(camera_model1.get()) != NULL ||
+            dynamic_cast<vw::camera::AdjustedCameraModel*>(camera_model2.get()) != NULL )
+          vw_throw(ArgumentErr() << "Since we perform piecewise adjustments "
+                   << "to reduce jitter, the input cameras should not have been bundle-adjusted.\n");
+
+        if (stereo_settings().piecewise_adjustment_interp_type != 1 &&
+            stereo_settings().piecewise_adjustment_interp_type != 2)
+          vw_throw(ArgumentErr() << "Interpolation type for piecewise "
+                   << "adjustment can be only 1 or 2.\n");
+
+      }
+
     } catch (const exception& e) {
       // Don't throw an error here. There are legitimate reasons as to
-      // why this check may fail. For example, the top left pixel
+      // why the first checks may fail. For example, the top left pixel
       // might not be valid on a map projected image. But notify the
-      // user anyway.
-      vw_out(DebugMessage,"asp") << e.what() << endl;
+      // user anyway. Make an exception for the piecewise adjustment checks.
+      if (!force_throw)
+        vw_out(DebugMessage,"asp") << e.what() << endl;
+      else
+        vw_throw( ArgumentErr() << e.what() );
+
     }
 
   }
@@ -687,159 +749,36 @@ namespace asp {
       ( stereo_settings().right_image_crop_win != BBox2i(0, 0, 0, 0) );
 
     // Building / Loading Interest point data
-    if (fs::exists(match_filename) && !crop_left_and_right) {
-      vw_out() << "\t    * Using cached match file: " << match_filename << "\n";
-      ip::read_binary_match_file(match_filename, matched_ip1, matched_ip2);
-    } else {
+    if (!fs::exists(match_filename) || crop_left_and_right) {
 
-      vector<ip::InterestPoint> ip1_copy, ip2_copy;
+      // No interest point operations have been performed before
+      vw_out() << "\t    * Locating Interest Points\n";
 
-      if ( crop_left_and_right || !fs::exists(left_ip_file) || !fs::exists(right_ip_file) ) {
+      boost::shared_ptr<DiskImageResource>
+        left_rsrc (DiskImageResource::open(left_sub_file )),
+        right_rsrc(DiskImageResource::open(right_sub_file));
 
-        // Worst case, no interest point operations have been performed before
-        vw_out() << "\t    * Locating Interest Points\n";
+      // Read the no-data values written to disk previously when
+      // the normalized left and right sub-images were created.
+      float left_nodata_value  = numeric_limits<float>::quiet_NaN();
+      float right_nodata_value = numeric_limits<float>::quiet_NaN();
+      if (left_rsrc->has_nodata_read ()) left_nodata_value  = left_rsrc->nodata_read();
+      if (right_rsrc->has_nodata_read()) right_nodata_value = right_rsrc->nodata_read();
 
-        boost::shared_ptr<DiskImageResource>
-          left_rsrc (DiskImageResource::open(left_sub_file )),
-          right_rsrc(DiskImageResource::open(right_sub_file));
+      DiskImageView<PixelT> left_sub_image (left_rsrc );
+      DiskImageView<PixelT> right_sub_image(right_rsrc);
 
-        // Read the no-data values written to disk previously when
-        // the normalized left and right sub-images were created.
-        float left_nodata_value  = numeric_limits<float>::quiet_NaN();
-        float right_nodata_value = numeric_limits<float>::quiet_NaN();
-        if (left_rsrc->has_nodata_read ()) left_nodata_value  = left_rsrc->nodata_read();
-        if (right_rsrc->has_nodata_read()) right_nodata_value = right_rsrc->nodata_read();
-
-        DiskImageView<PixelT> left_sub_image (left_rsrc );
-        DiskImageView<PixelT> right_sub_image(right_rsrc);
-        // Interest Point module detector code.
-        float ipgain = 0.07;
-        list<ip::InterestPoint> ip1, ip2;
-        vw_out() << "\t    * Processing for Interest Points.\n";
-        while (ip1.size() < 1500 || ip2.size() < 1500) {
-          ip1.clear();
-          ip2.clear();
-
-          ip::OBALoGInterestOperator interest_operator(ipgain);
-          ip::IntegralInterestPointDetector<ip::OBALoGInterestOperator> detector(interest_operator, 0);
-
-          if (boost::math::isnan(left_nodata_value))
-            ip1 = detect_interest_points(left_sub_image, detector);
-          else
-            ip1 = detect_interest_points(apply_mask(create_mask_less_or_equal(left_sub_image,left_nodata_value)), detector);
-
-          if (boost::math::isnan(right_nodata_value))
-            ip2 = detect_interest_points(right_sub_image, detector);
-          else
-            ip2 = detect_interest_points(apply_mask(create_mask_less_or_equal(right_sub_image,right_nodata_value)), detector);
-
-          if (!boost::math::isnan(left_nodata_value))
-            remove_ip_near_nodata( left_sub_image, left_nodata_value, ip1);
-
-          if (!boost::math::isnan(right_nodata_value))
-            remove_ip_near_nodata(right_sub_image, right_nodata_value, ip2);
-
-          ipgain *= 0.75;
-          if (ipgain < 1e-2) {
-            vw_out() << "\t    * Unable to find desirable amount of Interest Points.\n";
-            break;
-          }
-        }
-
-        if (ip1.size() < 8 || ip2.size() < 8)
-          vw_throw( InputErr() << "Unable to extract interest points from input images ["
-                    << left_sub_file << "," << right_sub_file << "]! Unable to continue." );
-
-        // Making sure we don't exceed 3000 points
-        if (ip1.size() > 3000) {
-          ip1.sort(); ip1.resize(3000);
-        }
-        if (ip2.size() > 3000) {
-          ip2.sort(); ip2.resize(3000);
-        }
-
-        // Stripping out orientation. This allows for a better
-        // possibility of interest point matches.
-        //
-        // This is no loss as images at this point are already aligned
-        // since the dense correlator is not rotation-invariant.
-        BOOST_FOREACH(ip::InterestPoint& ip, ip1) ip.orientation = 0;
-        BOOST_FOREACH(ip::InterestPoint& ip, ip2) ip.orientation = 0;
-
-        vw_out() << "\t    * Building descriptors..." << flush;
-        ip::SGradDescriptorGenerator descriptor;
-        if (boost::math::isnan(left_nodata_value))
-          describe_interest_points(left_sub_image, descriptor, ip1);
-        else
-          describe_interest_points(apply_mask(create_mask_less_or_equal(left_sub_image,left_nodata_value)), descriptor, ip1);
-        if (boost::math::isnan(right_nodata_value))
-          describe_interest_points(right_sub_image, descriptor, ip2);
-        else
-          describe_interest_points(apply_mask(create_mask_less_or_equal(right_sub_image,right_nodata_value)), descriptor, ip2);
-
-        vw_out() << "done.\n";
-
-        // Writing out the results
-        vw_out() << "\t    * Caching interest points: " << left_ip_file << " & " << right_ip_file << endl;
-        ip::write_binary_ip_file(left_ip_file,  ip1);
-        ip::write_binary_ip_file(right_ip_file, ip2);
-
-      }
-
-      vw_out() << "\t    * Using cached IPs.\n";
-      ip1_copy = ip::read_binary_ip_file(left_ip_file );
-      ip2_copy = ip::read_binary_ip_file(right_ip_file);
-
-      vw_out() << "\t    * Matching interest points\n";
-      ip::InterestPointMatcher<ip::L2NormMetric,ip::NullConstraint> matcher(0.6);
-
-      matcher(ip1_copy, ip2_copy, matched_ip1, matched_ip2,
-              TerminalProgressCallback("asp", "\t    Matching: "));
-      vw_out(InfoMessage) << "\t    " << matched_ip1.size() << " putative matches.\n";
-
-      vw_out() << "\t    * Rejecting outliers using RANSAC.\n";
-      ip::remove_duplicates(matched_ip1, matched_ip2);
-      vector<Vector3> ransac_ip1 = ip::iplist_to_vectorlist(matched_ip1),
-                      ransac_ip2 = ip::iplist_to_vectorlist(matched_ip2);
-      vector<size_t> indices;
-
-      try {
-        // Figure out the inlier threshold .. it should be about 3% of
-        // the edge lengths. This is a bit of a magic number, but I'm
-        // pulling from experience that an inlier threshold of 30
-        // worked best for 1024^2 AMC imagery.
-        float inlier_threshold =
-          0.0075 * (sum(file_image_size(left_sub_file )) +
-                    sum(file_image_size(right_sub_file)) );
-
-        math::RandomSampleConsensus<math::HomographyFittingFunctor,math::InterestPointErrorMetric>
-          ransac(math::HomographyFittingFunctor(), math::InterestPointErrorMetric(), 100, inlier_threshold, ransac_ip1.size()/2, true);
-        Matrix<double> trans = ransac(ransac_ip1, ransac_ip2);
-        vw_out(DebugMessage,"asp") << "\t    * Ransac Result: " << trans << endl;
-        vw_out(DebugMessage,"asp") << "\t      inlier thresh: "
-                                   << inlier_threshold << " px" << endl;
-        indices = ransac.inlier_indices(trans, ransac_ip1, ransac_ip2);
-      } catch (vw::math::RANSACErr const& e) {
-        vw_out() << "-------------------------------WARNING---------------------------------\n";
-        vw_out() << "\t    RANSAC failed! Unable to auto detect search range.\n\n";
-        vw_out() << "\t    Please proceed cautiously!\n";
-        vw_out() << "-------------------------------WARNING---------------------------------\n";
-        return BBox2i(-10,-10,20,20);
-      }
-
-      { // Keeping only inliers
-        vector<ip::InterestPoint> inlier_ip1, inlier_ip2;
-        for (size_t i = 0; i < indices.size(); i++) {
-          inlier_ip1.push_back(matched_ip1[indices[i]]);
-          inlier_ip2.push_back(matched_ip2[indices[i]]);
-        }
-        matched_ip1 = inlier_ip1;
-        matched_ip2 = inlier_ip2;
-      }
-
-      vw_out() << "\t    * Caching matches: " << match_filename << "\n";
-      write_binary_match_file( match_filename, matched_ip1, matched_ip2);
+      // This will write match_filename to disk.
+      bool success = asp::homography_ip_matching(left_sub_image, right_sub_image,
+                                                 stereo_settings().ip_per_tile,
+                                                 match_filename,
+                                                 left_nodata_value, right_nodata_value);
+      if (!success)
+        vw_throw(ArgumentErr() << "Could not find interest points.\n");
     }
+
+    vw_out() << "\t    * Using cached match file: " << match_filename << "\n";
+    ip::read_binary_match_file(match_filename, matched_ip1, matched_ip2);
 
     // Find search window based on interest point matches
     namespace ba = boost::accumulators;

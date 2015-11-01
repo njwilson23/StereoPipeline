@@ -68,13 +68,15 @@
 
 /*
   This file contains helper functions for the pc_align tool.
-  
+
   Some of these could probably be moved elsewhere, but many of them depend on
   libpointmatcher object types.
 */
 
 
-
+// Find the best fitting rotation + translation + scale transform among
+// the two sets of points represented as matrix columns.
+Eigen::Affine3d Find3DAffineTransform(Eigen::Matrix3Xd in, Eigen::Matrix3Xd out);
 
 typedef double RealT; // We will use doubles in libpointmatcher.
 
@@ -191,7 +193,7 @@ void load_las(bool verbose,
              vw::cartography::GeoReference const& geo,
              typename PointMatcher<T>::DataPoints & data
              );
-             
+
 /// Load a file from disk and convert to libpointmatcher's format
 template<typename T>
 void load_file(std::string const& file_name,
@@ -204,7 +206,7 @@ void load_file(std::string const& file_name,
                bool & is_lola_rdr_format,
                double & mean_longitude,
                bool verbose,
-               typename PointMatcher<T>::DataPoints & data); 
+               typename PointMatcher<T>::DataPoints & data);
 
 /// Calculate the lon-lat bounding box of the points and bias it based
 /// on max displacement (which is in meters). This is used to throw
@@ -285,15 +287,30 @@ void save_trans_point_cloud(asp::BaseOptions const& opt,
 /// Save a transformed point cloud with N bands
 template<int n> // Number of bands
 void save_trans_point_cloud_n(asp::BaseOptions const& opt,
+                              vw::cartography::GeoReference const& geo,
                               std::string input_file,
                               std::string output_file,
                               PointMatcher<RealT>::Matrix const& T){
 
+  // We will try to save the transformed cloud with a georef. Try to get it from
+  // the input cloud, or otherwise from the "global" georef.
+  vw::cartography::GeoReference curr_geo;
+  bool has_georef = vw::cartography::read_georeference(curr_geo, input_file);
+  if (!has_georef && geo.datum().name() != UNSPECIFIED_DATUM){
+    has_georef = true;
+    curr_geo = geo;
+  }
+
+  // There is no nodata
+  bool has_nodata = false;
+  double nodata = -std::numeric_limits<float>::max(); // smallest float
+
   vw::ImageViewRef< vw::Vector<double, n> > point_cloud = asp::read_asp_point_cloud<n>(input_file);
   asp::block_write_gdal_image(output_file,
                               per_pixel_filter(point_cloud, TransformPC(T)),
-                              opt,
-                              vw::TerminalProgressCallback("asp", "\t--> "));
+                              has_georef, curr_geo,
+                              has_nodata, nodata,
+                              opt, vw::TerminalProgressCallback("asp", "\t--> "));
 }
 
 
@@ -302,8 +319,8 @@ void save_trans_point_cloud_n(asp::BaseOptions const& opt,
 
 
 /// A type for interpolation from a masked DEM object.
-typedef vw::InterpolationView< vw::EdgeExtensionView< vw::ImageViewRef< vw::PixelMask<float> >, 
-                                                      vw::ConstantEdgeExtension>, 
+typedef vw::InterpolationView< vw::EdgeExtensionView< vw::ImageViewRef< vw::PixelMask<float> >,
+                                                      vw::ConstantEdgeExtension>,
                                vw::BilinearInterpolation> InterpolationReadyDem;
 
 /// Get ready to interpolate points on a DEM existing on disk.
@@ -317,30 +334,6 @@ bool interp_dem_height(vw::ImageViewRef< vw::PixelMask<float> > const& dem,
                        vw::Vector3                   const & lonlat,
                        double                              & dem_height);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <asp/Tools/pc_align_utils.tcc>
 
 #endif // #define __PC_ALIGN_UTILS_H__
-

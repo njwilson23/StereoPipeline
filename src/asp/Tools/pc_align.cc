@@ -57,6 +57,7 @@
 #include <asp/Core/Common.h>
 #include <asp/Core/Macros.h>
 #include <asp/Core/PointUtils.h>
+#include <asp/Core/InterestPointMatching.h>
 #include <liblas/liblas.hpp>
 
 #include <limits>
@@ -80,6 +81,7 @@ typedef PointMatcher<RealT> PM;
 typedef PM::DataPoints DP;
 using namespace PointMatcherSupport;
 
+const double BIG_NUMBER = 1e+300; // libpointmatcher does not like here the largest double
 
 // Allows FileIO to correctly read/write these pixel types
 namespace vw {
@@ -93,14 +95,8 @@ namespace vw {
 /// Options container for the pc_align tool
 struct Options : public asp::BaseOptions {
   // Input
-  string reference,
-         source,
-         init_transform_file,
-         alignment_method,
-         config_file,
-         datum,
-         csv_format_str,
-         csv_proj4_str;
+  string reference, source, init_transform_file, alignment_method, config_file,
+    datum, csv_format_str, csv_proj4_str, match_file;
   PointMatcher<RealT>::Matrix init_transform;
   int    num_iter,
          max_num_reference_points,
@@ -155,23 +151,28 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
     ("csv-proj4",                po::value(&opt.csv_proj4_str)->default_value(""),
                                  "The PROJ.4 string to use to interpret the entries in input CSV files.")
     ("datum",                    po::value(&opt.datum)->default_value(""),
-                                 "Use this datum for CSV files instead of auto-detecting it. [WGS_1984, D_MOON (radius is assumed to be 1,737,400 meters), D_MARS (radius is assumed to be 3,396,190 meters), etc.]")
+                                 "Use this datum for CSV files instead of auto-detecting it. Options: WGS_1984, D_MOON (1,737,400 meters), D_MARS (3,396,190 meters), MOLA (3,396,000 meters), NAD83, WGS72, and NAD27. Also accepted: Earth (=WGS_1984), Mars (=D_MARS), Moon (=D_MOON).")
     ("semi-major-axis",          po::value(&opt.semi_major)->default_value(0),
                                  "Explicitly set the datum semi-major axis in meters.")
     ("semi-minor-axis",          po::value(&opt.semi_minor)->default_value(0),
                                  "Explicitly set the datum semi-minor axis in meters.")
-    ("config-file",              po::value(&opt.config_file)->default_value(""),
-                                 "This is an advanced option. Read the alignment parameters from a configuration file, in the format expected by libpointmatcher, over-riding the command-line options.")
     ("output-prefix,o",          po::value(&opt.out_prefix)->default_value("run/run"),
                                  "Specify the output prefix.")
     ("compute-translation-only", po::bool_switch(&opt.compute_translation_only)->default_value(false)->implicit_value(true),
                                  "Compute the transform from source to reference point cloud as a translation only (no rotation).")
-    ("no-dem-distances",         po::bool_switch(&opt.dont_use_dem_distances)->default_value(false)->implicit_value(true),
-                                 "For reference point clouds that are DEMs, don't take advantage of the fact that it is possible to interpolate into this DEM when finding the closest distance to it from a point in the source cloud.")
     ("save-transformed-source-points", po::bool_switch(&opt.save_trans_source)->default_value(false)->implicit_value(true),
                                   "Apply the obtained transform to the source points so they match the reference points and save them.")
     ("save-inv-transformed-reference-points", po::bool_switch(&opt.save_trans_ref)->default_value(false)->implicit_value(true),
-                                  "Apply the inverse of the obtained transform to the reference points so they match the source points and save them.");
+     "Apply the inverse of the obtained transform to the reference points so they match the source points and save them.")
+
+    ("no-dem-distances",         po::bool_switch(&opt.dont_use_dem_distances)->default_value(false)->implicit_value(true),
+                                 "For reference point clouds that are DEMs, don't take advantage of the fact that it is possible to interpolate into this DEM when finding the closest distance to it from a point in the source cloud and hence the error metrics.")
+
+    ("match-file", po::value(&opt.match_file)->default_value(""),
+     "Compute a translation + rotation + scale transform from the source to the reference point cloud using manually selected point correspondences (obtained for example using stereo_gui).")
+    ("config-file",              po::value(&opt.config_file)->default_value(""),
+     "This is an advanced option. Read the alignment parameters from a configuration file, in the format expected by libpointmatcher, over-riding the command-line options.");
+
   //("verbose", po::bool_switch(&opt.verbose)->default_value(false)->implicit_value(true),
   // "Print debug information");
 
@@ -179,8 +180,8 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
 
   po::options_description positional("");
   positional.add_options()
-    ("reference", po::value(&opt.reference), "The reference (fixed) point cloud/DEM")
-    ("source",    po::value(&opt.source),    "The source (movable) point cloud/DEM");
+    ("reference", po::value(&opt.reference), "The reference (fixed) point cloud/DEM.")
+    ("source",    po::value(&opt.source),    "The source (movable) point cloud/DEM.");
 
   po::positional_options_description positional_desc;
   positional_desc.add("reference", 1);
@@ -199,6 +200,10 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
 
   if ( opt.out_prefix.empty() )
     vw_throw( ArgumentErr() << "Missing output prefix.\n" << usage << general_options );
+
+  // There is no need to use max-displacement with custom tie points.
+  if (opt.match_file != "")
+    opt.max_disp = -1.0;
 
   if ( opt.max_disp == 0.0 )
     vw_throw( ArgumentErr() << "The max-displacement option was not set. Use -1 if it is desired not to use it.\n"
@@ -229,7 +234,7 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
   }
 
   // Create the output directory
-  asp::create_out_dir(opt.out_prefix);
+  vw::create_out_dir(opt.out_prefix);
 
   // Turn on logging to file
   asp::log_to_file(argc, argv, "", opt.out_prefix);
@@ -254,9 +259,18 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
 
 }
 
+/// Try to read the georef/datum info, need it to read CSV files.
+void read_georef(Options& opt, asp::CsvConv& csv_conv, GeoReference& geo){
 
-/// Set up the datum, need it to read CSV files.
-void read_datum(Options& opt, asp::CsvConv& csv_conv, Datum& datum){
+  // Use an initialized datum for the georef, so later we can check
+  // if we manage to populate it.
+  {
+    Datum datum(UNSPECIFIED_DATUM, "User Specified Spheroid",
+              "Reference Meridian", 1, 1, 0);
+    geo.set_datum(datum);
+  }
+
+  bool is_good = false;
 
   // First, get the datum from the DEM if available.
   string dem_file = "";
@@ -265,48 +279,88 @@ void read_datum(Options& opt, asp::CsvConv& csv_conv, Datum& datum){
   else if ( get_file_type(opt.source) == "DEM" )
     dem_file = opt.source;
   if (dem_file != ""){
-    GeoReference geo;
-    bool is_good = cartography::read_georeference( geo, dem_file );
-    if (!is_good)
+    GeoReference local_geo;
+    bool have_georef = cartography::read_georeference(local_geo, dem_file);
+    if (!have_georef)
       vw_throw(ArgumentErr() << "DEM: " << dem_file << " does not have a georeference.\n");
-    datum = geo.datum();
-    vw_out() << "Detected datum from " << dem_file << ":\n" << datum << std::endl;
+    geo = local_geo;
+    vw_out() << "Detected datum from " << dem_file << ":\n" << geo.datum() << std::endl;
+    is_good = true;
+  }
+
+  // Then, try to set it from the pc file if available.
+  // Either one, or both or neither of the pc files may have a georef.
+  string pc_file = "";
+  if ( get_file_type(opt.reference) == "PC" ){
+    GeoReference local_geo;
+    if (cartography::read_georeference(local_geo, opt.reference)){
+      pc_file = opt.reference;
+      geo = local_geo;
+      vw_out() << "Detected datum from " << pc_file << ":\n" << geo.datum() << std::endl;
+      is_good = true;
+    }
+  }
+  if ( get_file_type(opt.source) == "PC" ){
+    GeoReference local_geo;
+    if (cartography::read_georeference(local_geo, opt.source)){
+      pc_file = opt.source;
+      geo = local_geo;
+      vw_out() << "Detected datum from " << pc_file << ":\n" << geo.datum() << std::endl;
+      is_good = true;
+    }
   }
 
   // Then, try to set it from the las file if available.
+  // Either one, or both or neither of the las files may have a georef.
   string las_file = "";
   if ( get_file_type(opt.reference) == "LAS" ){
-    GeoReference geo;
-    if (asp::georef_from_las(opt.reference, geo)){
+    GeoReference local_geo;
+    if (asp::georef_from_las(opt.reference, local_geo)){
       las_file = opt.reference;
-      datum    = geo.datum();
-      vw_out() << "Detected datum from " << las_file << ":\n" << datum << std::endl;
+      geo = local_geo;
+      vw_out() << "Detected datum from " << las_file << ":\n" << geo.datum() << std::endl;
+      is_good = true;
     }
   }
   if ( get_file_type(opt.source) == "LAS" ){
-    GeoReference geo;
-    if (asp::georef_from_las(opt.source, geo)){
+    GeoReference local_geo;
+    if (asp::georef_from_las(opt.source, local_geo)){
       las_file = opt.source;
-      datum    = geo.datum();
-      vw_out() << "Detected datum from " << las_file << ":\n" << datum << std::endl;
+      geo = local_geo;
+      vw_out() << "Detected datum from " << las_file << ":\n" << geo.datum() << std::endl;
+      is_good = true;
     }
   }
+
   // We should have read in the datum from an input file, but check to see if
   //  we should override it with input parameters.
 
-  // A lot of care is needed below.
   if (opt.datum != ""){
     // If the user set the datum, use it.
+    Datum datum;
     datum.set_well_known_datum(opt.datum);
-    vw_out() << "Will use datum (for CSV files): "  << datum << std::endl;
+    geo.set_datum(datum);
+    is_good = true;
   }else if (opt.semi_major > 0 && opt.semi_minor > 0){
     // Otherwise, if the user set the semi-axes, use that.
-    datum = Datum("User Specified Datum", "User Specified Spheroid",
-                  "Reference Meridian",
-                  opt.semi_major, opt.semi_minor, 0.0);
-    vw_out() << "Will use datum (for CSV files): " << datum << std::endl;
-  }else if (dem_file == "" && las_file == "" &&
-            (opt.csv_format_str == "" || csv_conv.format != asp::CsvConv::XYZ) ){
+    Datum datum = Datum("User Specified Datum", "User Specified Spheroid",
+                        "Reference Meridian",
+                        opt.semi_major, opt.semi_minor, 0.0);
+    geo.set_datum(datum);
+    is_good = true;
+  }
+
+  // This must be the last as it has priority. Use user's csv_proj4 string,
+  // to add info to the georef.
+  if (csv_conv.parse_georef(geo)) {
+    is_good = true;
+  }
+
+  if (is_good)
+    vw_out() << "Will use datum (for CSV files): " << geo.datum() << std::endl;
+
+  // A lot of care is needed below.
+  if (!is_good  && (opt.csv_format_str == "" || csv_conv.format != asp::CsvConv::XYZ) ){
     // There is no DEM/LAS to read the datum from, and the user either
     // did not specify the CSV format (then we set it to lat, lon,
     // height), or it is specified as containing lat, lon, rather than xyz.
@@ -315,16 +369,20 @@ void read_datum(Options& opt, asp::CsvConv& csv_conv, Datum& datum){
     if (has_csv){
       // We are in trouble, will not be able to convert input lat, lon, to xyz.
       vw_throw( ArgumentErr() << "Cannot detect the datum. "
-                              << "Please specify it via --datum or "
+                              << "Please specify it via --csv-proj4 or --datum or "
                               << "--semi-major-axis and --semi-minor-axis.\n" );
     }else{
-      // The inputs are ASP point clouds. Need CSV only on output.
+      // The inputs have no georef. Will have to write xyz.
       vw_out() << "No datum specified. Will write output CSV files "
                << "in the x,y,z format." << std::endl;
       opt.csv_format_str = "1:x 2:y 3:z";
       csv_conv.parse_csv_format(opt.csv_format_str, opt.csv_proj4_str);
+      is_good = true;
     }
   }
+
+  if (!is_good)
+    vw::vw_throw( vw::InputErr() << "Datum is required and could not be set.\n");
 
   return;
 }
@@ -388,7 +446,7 @@ void save_transforms(Options const& opt,
                      PointMatcher<RealT>::Matrix const& T){
 
   string transFile = opt.out_prefix + "-transform.txt";
-  vw_out() << "Writing: " << transFile  << endl;
+  vw_out() << "Writing: " << transFile << endl;
   ofstream tf(transFile.c_str());
   tf.precision(16);
   tf << T << endl;
@@ -396,7 +454,7 @@ void save_transforms(Options const& opt,
 
   string iTransFile = opt.out_prefix + "-inverse-transform.txt";
   PointMatcher<RealT>::Matrix invT = T.inverse();
-  vw_out() << "Writing: " << iTransFile  << endl;
+  vw_out() << "Writing: " << iTransFile << endl;
   ofstream itf(iTransFile.c_str());
   itf.precision(16);
   itf << invT << endl;
@@ -424,8 +482,7 @@ void save_errors(DP const& point_cloud,
                  GeoReference const& geo,
                  asp::CsvConv const& csv_conv,
                  bool is_lola_rdr_format,
-                 double mean_longitude
-                 ){
+                 double mean_longitude){
 
   vw_out() << "Writing: " << output_file << std::endl;
 
@@ -447,6 +504,12 @@ void save_errors(DP const& point_cloud,
       outfile << "# longitude,latitude,radius (km),error (meters)" << endl;
     else
       outfile << "# latitude,longitude,height above datum (meters),error (meters)" << endl;
+  }
+
+  // Save the datum, may be useful to know what it was
+  if (geo.datum().name() != UNSPECIFIED_DATUM){
+    outfile << "# " << geo.datum() << std::endl;
+    outfile << "# Projection: " << geo.overall_proj4_str() << std::endl;
   }
 
   int numPts = point_cloud.features.cols();
@@ -501,7 +564,6 @@ void calcErrorsWithDem(DP          const& point_cloud,
                        vw::cartography::GeoReference        const& georef,
                        vw::ImageViewRef< PixelMask<float> > const& dem,
                        std::vector<double> &errors) {
-  const double BIG_NUMBER = 1e+300; // Flag indicating no match found in the DEM
 
   // Initialize output error storage
   const int num_pts = point_cloud.features.cols();
@@ -598,7 +660,7 @@ double compute_registration_error(DP          const& ref_point_cloud,
   sw.start();
 
   // Always start by computing the error using LPM
-  const double BIG_NUMBER = 1e+300; // A big number to make sure no points are filtered!
+  // Use a big number to make sure no points are filtered!
   pm_icp_object.filterGrossOutliersAndCalcErrors(ref_point_cloud, BIG_NUMBER,
                                                  source_point_cloud, error_matrix);
 
@@ -632,6 +694,9 @@ void filter_source_cloud(DP          const& ref_point_cloud,
   Stopwatch sw;
   sw.start();
 
+  if (opt.verbose)
+    vw_out() << "Filtering gross outliers" << endl;
+
   PointMatcher<RealT>::Matrix error_matrix;
   if (opt.use_dem_distances()) {
     // Compute the registration error using the best available means
@@ -647,7 +712,100 @@ void filter_source_cloud(DP          const& ref_point_cloud,
 
   sw.stop();
   if (opt.verbose)
-    vw_out() << "Filter gross outliers took " << sw.elapsed_seconds() << " [s]" << endl;
+    vw_out() << "Filtering gross outliers took " << sw.elapsed_seconds() << " [s]" << endl;
+}
+
+// Compute a manual transform based on tie points (interest point matches).
+void manual_transform(Options & opt){
+
+  if (get_file_type(opt.reference) != "DEM" ||
+      get_file_type(opt.source) != "DEM" )
+    vw_throw( ArgumentErr() << "The alignment transform computation based on manually chosen point matches only works for DEMs. Use point2dem to first create DEMs from the input point clouds.\n" );
+
+  vector<vw::ip::InterestPoint> ref_ip, source_ip;
+  vw_out() << "Reading match file: " << opt.match_file << "\n";
+  vw::ip::read_binary_match_file(opt.match_file, ref_ip, source_ip);
+
+  DiskImageView<float> ref(opt.reference);
+  vw::cartography::GeoReference ref_geo;
+  bool has_ref_geo = vw::cartography::read_georeference(ref_geo, opt.reference);
+  double ref_nodata = -std::numeric_limits<double>::max();
+  vw::read_nodata_val(opt.reference, ref_nodata);
+
+  DiskImageView<float> source(opt.source);
+  vw::cartography::GeoReference source_geo;
+  bool has_source_geo = vw::cartography::read_georeference(source_geo, opt.source);
+  double source_nodata = -std::numeric_limits<double>::max();
+  vw::read_nodata_val(opt.source, source_nodata);
+
+  if (!has_ref_geo || !has_source_geo)
+    vw_throw( ArgumentErr() << "One of the inputs is not a valid DEM.\n" );
+
+  if (DIM != 3)
+    vw_throw( ArgumentErr() << "Expecting DIM = 3.\n" );
+
+  // Go from pixels to 3D points
+  int num_matches = ref_ip.size();
+  Eigen::Matrix3Xd ref_mat(DIM, num_matches), source_mat(DIM, num_matches);
+  int count = 0;
+  for (int match_id = 0; match_id < num_matches; match_id++) {
+    int ref_x = ref_ip[match_id].x;
+    int ref_y = ref_ip[match_id].y;
+    if (ref_x < 0 || ref_x >= ref.cols()) continue;
+    if (ref_y < 0 || ref_y >= ref.rows()) continue;
+    double ref_h = ref(ref_x, ref_y);
+    // Check for no-data and NaN pixels
+    if (ref_h <= ref_nodata || ref_h != ref_h) continue;
+
+    int source_x = source_ip[match_id].x;
+    int source_y = source_ip[match_id].y;
+    if (source_x < 0 || source_x >= source.cols()) continue;
+    if (source_y < 0 || source_y >= source.rows()) continue;
+    double source_h = source(source_x, source_y);
+    // Check for no-data and NaN pixels
+    if (source_h <= source_nodata || source_h != source_h) continue;
+
+    Vector2 ref_ll = ref_geo.pixel_to_lonlat(Vector2(ref_x, ref_y));
+    Vector3 ref_xyz = ref_geo.datum()
+      .geodetic_to_cartesian(Vector3(ref_ll[0], ref_ll[1], ref_h));
+
+    Vector2 source_ll = source_geo.pixel_to_lonlat(Vector2(source_x, source_y));
+    Vector3 source_xyz = source_geo.datum()
+      .geodetic_to_cartesian(Vector3(source_ll[0], source_ll[1], source_h));
+
+    // Go from VW vectors to Eigen vectors
+    Eigen::Vector3d ref_vec, source_vec;
+    for (int col = 0; col < DIM; col++) {
+      ref_vec[col]    = ref_xyz[col];
+      source_vec[col] = source_xyz[col];
+    }
+
+    ref_mat.col(count)    = ref_vec;
+    source_mat.col(count) = source_vec;
+    count++;
+  }
+
+  if (count < 3)
+    vw_throw( ArgumentErr() << "Not enough valid matches were found.\n");
+
+  // Resize the matrix to keep only the valid points. Find the transform.
+  ref_mat.conservativeResize(Eigen::NoChange, count);
+  source_mat.conservativeResize(Eigen::NoChange, count);
+  Eigen::Affine3d trans = Find3DAffineTransform(source_mat, ref_mat);
+
+  // Convert to pc_align transform format.
+  PointMatcher<RealT>::Matrix globalT = Eigen::MatrixXd::Identity(DIM+1, DIM+1);
+  globalT.block(0, 0, DIM, DIM) = trans.linear();
+  globalT.block(0, DIM, DIM, 1) = trans.translation();
+
+  vw_out() << "Computed manual transform from source to reference:\n" << globalT << std::endl;
+
+  // Save the transform to disk
+  save_transforms(opt, globalT);
+
+  vw_out() << "The transform file can be passed back to "
+	   << "pc_align as an initial guess via --initial-transform. "
+	   << "To have pc_align not further refine this transform, invoke it with 0 iterations.\n";
 }
 
 int main( int argc, char *argv[] ) {
@@ -662,16 +820,19 @@ int main( int argc, char *argv[] ) {
     // Set the number of threads for OpenMP
     omp_set_num_threads(opt.num_threads);
 
+    // Parse the csv format string and csv projection string
     asp::CsvConv csv_conv;
     csv_conv.parse_csv_format(opt.csv_format_str, opt.csv_proj4_str);
 
-    Datum datum(UNSPECIFIED_DATUM, "User Specified Spheroid",
-                "Reference Meridian", 1, 1, 0);
-    read_datum(opt, csv_conv, datum);
-    GeoReference geo(datum);
+    // Try to read the georeference/datum info
+    GeoReference geo;
+    read_georef(opt, csv_conv, geo);
 
-    // Set user's csv_proj4_str if specified
-    csv_conv.configure_georef(geo);
+    // Create a manual transform based on user-picked correspondences among clouds
+    if (opt.match_file != "") {
+      manual_transform(opt);
+      return 0;
+    }
 
     // We will use ref_box to bound the source points, and vice-versa.
     // Decide how many samples to pick to estimate these boxes.
@@ -680,13 +841,22 @@ int main( int argc, char *argv[] ) {
     int num_sample_pts = std::max(4000000,
                                   std::max(opt.max_num_source_points,
                                            opt.max_num_reference_points)/4);
-    // Compute GDC bounding box of the source and reference clouds
-    BBox2 ref_box, source_box;
-    ref_box    = calc_extended_lonlat_bbox(geo, num_sample_pts, csv_conv, opt.reference, opt.max_disp);
-    source_box = calc_extended_lonlat_bbox(geo, num_sample_pts, csv_conv, opt.source,    opt.max_disp);
 
-    // If ref points are offset by 360 degrees in longitude in respect to
-    // source points, adjust the ref box to be aligned with the source points, and vice versa.
+    // Compute GDC bounding box of the source and reference clouds
+    vw_out() << "Computing the intersection of the bounding boxes "
+             << "of the reference and source points." << endl;
+    BBox2 ref_box, source_box;
+    ref_box    = calc_extended_lonlat_bbox(geo, num_sample_pts, csv_conv,
+                                           opt.reference, opt.max_disp);
+    source_box = calc_extended_lonlat_bbox(geo, num_sample_pts, csv_conv,
+                                           opt.source,    opt.max_disp);
+    vw_out() << "Reference box: " << ref_box << std::endl;
+    vw_out() << "Source box:    " << source_box << std::endl;
+
+    // If ref points are offset by 360 degrees in longitude in respect
+    // to source points, adjust the ref box to be aligned with the
+    // source points, and vice versa.  Note that we will use the ref
+    // box to bound the source points, and vice-versa.
     double lon_offset = 0.0;
     if (!ref_box.empty() && !source_box.empty()){
       // Compute the longitude offset
@@ -696,14 +866,20 @@ int main( int argc, char *argv[] ) {
       lon_offset = 360.0*round(lon_offset/360.0);
       // Apply to both bounding boxes
       ref_box    += Vector2(lon_offset, 0);
+      // Intersect them, as pc_align will operate on their common area
       ref_box.crop(source_box);
       source_box.crop(ref_box); // common area
       source_box -= Vector2(lon_offset, 0);
+
+      // Extra adjustments. These are needed since pixel_to_lonlat and
+      // cartesian_to_geodetic can disagree by 360 degress. Adjust ref
+      // to source and vice-versa.
+      adjust_lonlat_bbox(opt.reference, source_box);
+      adjust_lonlat_bbox(opt.source, ref_box);
     }
     sw0.stop();
-    if (opt.verbose)
-      vw_out() << "Determination of the intersection of bounding boxes of the reference"
-               << " and source points took " << sw0.elapsed_seconds() << " [s]" << endl;
+    vw_out() << "Intersection:  " << ref_box << std::endl;
+    vw_out() << "Intersection of bounding boxes took " << sw0.elapsed_seconds() << " [s]" << endl;
 
     // Load the point clouds. We will shift both point clouds by the
     // centroid of the first one to bring them closer to origin.
@@ -769,7 +945,7 @@ int main( int argc, char *argv[] ) {
     cartography::GeoReference dem_georef;
     vw::ImageViewRef< PixelMask<float> > reference_dem_ref;
     if (opt.use_dem_distances()) {
-      vw_out() << "Loading reference as DEM.." << endl;
+      vw_out() << "Loading reference as DEM." << endl;
       // Load the dem, then wrap it inside an ImageViewRef object.
       // - This is done because the actual DEM type cannot be created without being initialized.
       InterpolationReadyDem reference_dem(load_interpolation_ready_dem(opt.reference, dem_georef));
@@ -778,11 +954,12 @@ int main( int argc, char *argv[] ) {
 
     // Now all of the input data is loaded.
 
-
     // Filter the reference and initialize the reference tree
     double elapsed_time;
     PM::ICP icp;
     Stopwatch sw3;
+    if (opt.verbose)
+      vw_out() << "Building the reference cloud tree." << endl;
     sw3.start();
     icp.initRefTree(ref_point_cloud, opt.alignment_method, opt.highest_accuracy, false /*opt.verbose*/);
     sw3.stop();
@@ -800,7 +977,8 @@ int main( int argc, char *argv[] ) {
     }
 
     random_pc_subsample<RealT>(opt.max_num_source_points, source_point_cloud);
-    vw_out() << "Reducing number of source points to " << source_point_cloud.features.cols() << endl;
+    vw_out() << "Reducing number of source points to "
+             << source_point_cloud.features.cols() << endl;
 
     //dump_llh("ref.csv", datum, ref_point_cloud,    shift);
     //dump_llh("src.csv", datum, source, shift);

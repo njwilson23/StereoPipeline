@@ -24,15 +24,15 @@
 #include <vw/Math/Functors.h>
 #include <vw/Camera.h>
 #include <vw/Cartography.h>
-using namespace vw;
-using namespace vw::camera;
-using namespace vw::cartography;
 
 #include <asp/Core/Macros.h>
 #include <asp/Core/Common.h>
-#include <asp/Sessions.h>
-#include <asp/IsisIO/DiskImageResourceIsis.h>
+#include <asp/Sessions/StereoSessionFactory.h>
 #include <boost/tokenizer.hpp>
+
+using namespace vw;
+using namespace vw::camera;
+using namespace vw::cartography;
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
 
@@ -103,20 +103,13 @@ void write_parallel_cond( std::string const& filename,
   // ISIS is not thread safe so we must switch out base on what the
   // session is.
   vw_out() << "Writing: " << filename << "\n";
-  if (use_nodata){
-    if ( opt.stereo_session == "isis" ) {
-      asp::write_gdal_image(filename, image.impl(), georef, nodata_val, opt, tpc);
-    } else {
-      asp::block_write_gdal_image(filename, image.impl(), georef, nodata_val, opt, tpc);
-    }
-  }else{
-    if ( opt.stereo_session == "isis" ) {
-      asp::write_gdal_image(filename, image.impl(), georef, opt, tpc);
-    } else {
-      asp::block_write_gdal_image(filename, image.impl(), georef, opt, tpc);
-    }
-  }
-
+  bool has_georef = true;
+  if ( opt.stereo_session == "isis" )
+    asp::write_gdal_image(filename, image.impl(), has_georef, georef,
+                          use_nodata, nodata_val, opt, tpc);
+  else
+    asp::block_write_gdal_image(filename, image.impl(), has_georef, georef,
+                                use_nodata, nodata_val, opt, tpc);
 }
 
 // Convert PixelMask<PixelT> to PixelGrayA<PixelT> taking particular care
@@ -485,7 +478,7 @@ int main(int argc, char* argv[]) {
                                   << drg_georef << "\n";
 
     // Create and write the orthoprojected image.
-    asp::create_out_dir(opt.output_file);
+    vw::create_out_dir(opt.output_file);
     switch(texture_fmt.pixel_format) {
 
       // 1.0. RGB, with our without alpha channel

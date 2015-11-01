@@ -128,11 +128,43 @@ def writeSingleTile(options):
     tileName = generateTileName(options.pixelStartX, options.pixelStartY, options.pixelStopX, options.pixelStopY)
     tilePath = os.path.join(options.workDir, tileName)
 
+    # Bounds for this tile
+    startX = int(options.pixelStartX)
+    stopX  = int(options.pixelStopX)
+    startY = int(options.pixelStartY)
+    stopY  = int(options.pixelStopY)
+
+    # If the user passed in the t_pixelwin argument, reconcile it with the internal ROI we need.
+    extraArgs = []
+    i = 0
+    while i < len(options.extraArgs):
+        arg = options.extraArgs[i]
+
+        if arg == '--t_pixelwin':
+            # Skip this element and grab the user provided pixel bounds
+            userStartX = int(options.extraArgs[i+1])
+            userStopX  = int(options.extraArgs[i+2])
+            userStartY = int(options.extraArgs[i+3])
+            userStopY  = int(options.extraArgs[i+4])
+
+            # Reconcile the bounding box
+            if (startX < userStartX): startX = userStartX
+            if (stopX  > userStopX ): stopX  = userStopX
+            if (startY < userStartY): startY = userStartY
+            if (stopY  > userStopY ): stopY  = userStopY
+
+            # If there is no tile left to generate then we can just return here
+            if ((startX > stopX) or (startY > stopY)):
+                return 0
+            i += 5
+        else:
+            extraArgs.append(arg)
+            i += 1
+
     # Just call the command for a single tile!
-    cmd = ['mapproject_single',  '--t_pixelwin', str(options.pixelStartX), str(options.pixelStartY),
-                                                 str(options.pixelStopX), str(options.pixelStopY),
+    cmd = ['mapproject_single',  '--t_pixelwin', str(startX), str(startY), str(stopX), str(stopY),
                                options.demPath, options.imagePath, options.cameraPath, tilePath]
-    cmd = cmd + options.extraArgs # Append other options
+    cmd = cmd + extraArgs # Append other options
     asp_cmd_utils.executeCommand(cmd, suppressOutput=options.suppressOutput)
 
     if options.convertTiles: # Make uint8 version of the tile for debugging
@@ -149,10 +181,20 @@ def main(argsIn):
 
     relOutputPath = ""
     try:
-        usage      = "usage: mapproject [options] <dem> <camera-image> <output>"
-        epilogText = "This also accepts all 'mapproject' arguments though the 'threads' argument will typically be ignored."
-        parser     = asp_cmd_utils.PassThroughOptionParser(usage=usage, epilog=epilogText) # Use parser that ignores unknown options
+        # Get the help text from the base C++ tool so we can append it to the python help
+        cmd = ['mapproject_single',  '--help']
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        baseHelp, err = p.communicate()
 
+        # Extract the version and help text
+        vStart = baseHelp.find('[ASP')
+        vEnd   = baseHelp.find(']', vStart)+1
+        version = baseHelp[vStart:vEnd]
+        baseHelpText = baseHelp[vEnd:]
+
+        # Use parser that ignores unknown options
+        usage  = "usage: mapproject [options] <dem> <camera-image> <output>"
+        parser = asp_cmd_utils.PassThroughOptionParser(usage=usage, epilog=baseHelpText)
 
         parser.add_option("--num-processes",  dest="numProcesses", type='int', default=None,
                                               help="Number of processes to use (default program tries to choose best)")
@@ -198,23 +240,26 @@ def main(argsIn):
 
         # Check the required positional arguments.
         if len(requiredList) < 1:
-            parser.error("Missing input DEM.")
+            parser.print_help()
+            parser.error("Missing input DEM.\n" );
         if len(requiredList) < 2:
-            parser.error("Missing input image.")
+            parser.print_help()
+            parser.error("Missing input image.\n" );
         if len(requiredList) < 3:
-            parser.error("Missing output filename.")
+            parser.print_help()
+            parser.error("Missing output filename.\n" );
 
         # Make sure we have absolute paths here
-        options.demPath    = os.path.abspath(requiredList[0])
-        options.imagePath  = os.path.abspath(requiredList[1])
+        options.demPath    = requiredList[0]
+        options.imagePath  = requiredList[1]
         if len(requiredList) == 3:
             options.cameraPath = ''
             relOutputPath = requiredList[2]
-            options.outputPath = os.path.abspath(relOutputPath)
+            options.outputPath = relOutputPath
         else: # == 4
             relOutputPath = requiredList[3]
-            options.cameraPath = os.path.abspath(requiredList[2])
-            options.outputPath = os.path.abspath(relOutputPath)
+            options.cameraPath = requiredList[2]
+            options.outputPath = relOutputPath
 
         # Any additional arguments need to be forwarded to the mapproject function
         options.extraArgs = optionsList
@@ -238,9 +283,10 @@ def main(argsIn):
         cmd = ['mapproject_single',  options.demPath,
                 options.imagePath, options.cameraPath, options.outputPath]
         cmd = cmd + options.extraArgs
-        subprocess.call(cmd)
+        print(" ".join(cmd))
+        ans = subprocess.call(cmd)
+        if ans == 0: print("Wrote: " + relOutputPath)
         return 0
-
 
     # Otherwise this is the original called process and there are multiple steps to go through
 
@@ -248,6 +294,7 @@ def main(argsIn):
     cmd = ['mapproject_single',  '--query-projection', options.demPath,
                 options.imagePath, options.cameraPath, options.outputPath]
     cmd = cmd + options.extraArgs # Append other options
+    print(" ".join(cmd))
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     projectionInfo, err = p.communicate()
     if not options.suppressOutput:
@@ -274,7 +321,9 @@ def main(argsIn):
         cmd = ['mapproject_single',  options.demPath,
                 options.imagePath, options.cameraPath, options.outputPath]
         cmd = cmd + options.extraArgs
-        subprocess.call(cmd)
+        print(" ".join(cmd))
+        ans = subprocess.call(cmd)
+        if ans == 0: print("Wrote: " + relOutputPath)
         return 0
 
 
@@ -304,11 +353,6 @@ def main(argsIn):
     # Indicate to GNU Parallel that there are multiple tab-seperated variables in the text file we just wrote
     parallelArgs = ['--colsep', "\\t"]
 
-    # TODO: Move this to the lower level functions
-    # If using multiple computers, need to make sure the same program paths are available
-    if options.nodesListPath:
-        parallelArgs = parallelArgs + ['--env', 'PATH', '--env', 'PYTHONPATH', '--env', 'ISISROOT', '--env', 'ISIS3DATA']
-
     # Get the number of available nodes and CPUs per node
     numNodes = asp_system_utils.getNumNodesInList(options.nodesListPath)
 
@@ -333,7 +377,8 @@ def main(argsIn):
     # - The numbers in braces will receive the values from the text file we wrote earlier
     # - The output path used here does not matter since spawned copies compute the correct tile path.
     python_path = sys.executable # children must use same Python as parent
-    mapproject_path = asp_system_utils.bin_path('mapproject')
+    # We use below the libexec_path to call python, not the shell script
+    mapproject_path = asp_system_utils.libexec_path('mapproject')
     commandList   = [python_path, mapproject_path,
                      '--pixelStartX', '{1}',
                      '--pixelStartY', '{2}',
@@ -354,7 +399,9 @@ def main(argsIn):
 
     # Use GNU parallel call to distribute the work across computers
     # - This call will wait until all processes are finished
-    asp_system_utils.runInGnuParallel(options.numProcesses, commandString, argumentFilePath, parallelArgs, options.nodesListPath, True)#not options.suppressOutput)
+    asp_system_utils.runInGnuParallel(options.numProcesses, commandString,
+                                      argumentFilePath, parallelArgs,
+                                      options.nodesListPath, True)#not options.suppressOutput)
 
 
     # Build a gdal VRT file which is composed of all the processed tiles
@@ -363,17 +410,43 @@ def main(argsIn):
     print cmd
     os.system(cmd)
 
+    # Modify the vrt to append some metadata from the original files
+
+    # Get the metadata
+    files = glob.glob(tempFolder + "*_.tif")
+    if len(files) == 0:
+        raise "No mapprojected tif files were generated"
+    args=[files[0]]
+    sep = "="
+    verbose = False
+    gdal_settings = asp_system_utils.run_and_parse_output( "gdalinfo", args, sep, verbose)
+    meta = ["  <Metadata>\n"]
+    for v in ['CAMERA_MODEL_TYPE', 'BUNDLE_ADJUST_PREFIX', 'DEM_FILE']:
+        if v in gdal_settings:
+            line = "    <MDI key=\"" + v + "\">" + gdal_settings[v][0] + "</MDI>\n"
+            meta.append(line)
+    meta.append("  </Metadata>\n")
+
+    # Append the metadata after the first line in the vrt.
+    f = open(vrtPath, "r")
+    lines = f.readlines()
+    f.close()
+    lines = [ lines[0] ] + meta + lines[1:len(lines)]
+    f = open(vrtPath, "w")
+    f.writelines(lines)
+    f.close()
+
     # Convert VRT file to final output file
-    cmd = "gdal_translate -co compress=lzw -co bigtiff=yes " + vrtPath + " " + options.outputPath;
+    cmd = "gdal_translate -co compress=lzw -co bigtiff=yes -co TILED=yes -co INTERLEAVE=BAND -co BLOCKXSIZE=256 -co BLOCKYSIZE=256 " + vrtPath + " " + options.outputPath;
     print cmd
-    os.system(cmd)
+    ans = os.system(cmd)
 
     # Clean up temporary files
     if not options.keep:
         print("Removing: " + tempFolder)
         asp_file_utils.removeFolderIfExists(tempFolder)
 
-    print("Wrote: " + relOutputPath)
+    if ans == 0: print("Wrote: " + relOutputPath)
 
     endTime = time.time()
     print "Finished in " + str(endTime - startTime) + " seconds."

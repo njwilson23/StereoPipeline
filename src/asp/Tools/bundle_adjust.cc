@@ -20,10 +20,35 @@
 ///
 
 #include <asp/Core/Macros.h>
-#include <asp/Sessions.h>
+#include <asp/Sessions/StereoSession.h>
+#include <asp/Sessions/StereoSessionFactory.h>
+#include <asp/Core/StereoSettings.h>
 #include <asp/Tools/bundle_adjust.h>
+#include <asp/Core/InterestPointMatching.h>
+
+// Turn off warnings from eigen
+#if defined(__GNUC__) || defined(__GNUG__)
+#define LOCAL_GCC_VERSION (__GNUC__ * 10000                    \
+                           + __GNUC_MINOR__ * 100              \
+                           + __GNUC_PATCHLEVEL__)
+#if LOCAL_GCC_VERSION >= 40600
+#pragma GCC diagnostic push
+#endif
+#if LOCAL_GCC_VERSION >= 40202
+#pragma GCC diagnostic ignored "-Wunused-local-typedefs"
+#endif
+#endif
+
 #include <ceres/ceres.h>
 #include <ceres/loss_function.h>
+
+#if defined(__GNUC__) || defined(__GNUG__)
+#if LOCAL_GCC_VERSION >= 40600
+#pragma GCC diagnostic pop
+#endif
+#undef LOCAL_GCC_VERSION
+#endif
+
 
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
@@ -79,14 +104,18 @@ struct Options : public asp::BaseOptions {
   boost::shared_ptr<ControlNetwork> cnet;
   std::vector<boost::shared_ptr<CameraModel> > camera_models;
   cartography::Datum datum;
+  int ip_detect_method;
+  bool individually_normalize;
 
   // Make sure all values are initialized, even though they will be
   // over-written later.
-  Options(): ip_per_tile(0), min_angle(0), lambda(-1.0), camera_weight(0), robust_threshold(0), report_level(0), min_matches(0),
-            max_iterations(0), overlap_limit(0), save_iteration(false), have_input_cams(true),
-            semi_major(0), semi_minor(0),
-            datum(cartography::Datum(UNSPECIFIED_DATUM, "User Specified Spheroid",
-                                     "Reference Meridian", 1, 1, 0)){}
+  Options(): ip_per_tile(0), min_angle(0), lambda(-1.0), camera_weight(-1),
+             robust_threshold(0), report_level(0), min_matches(0),
+             max_iterations(0), overlap_limit(0), save_iteration(false), have_input_cams(true),
+             semi_major(0), semi_minor(0),
+             datum(cartography::Datum(UNSPECIFIED_DATUM, "User Specified Spheroid",
+                                      "Reference Meridian", 1, 1, 0)),
+             ip_detect_method(0){}
 };
 
 
@@ -157,11 +186,11 @@ update_cnet_and_init_cams(ModelT & ba_model, Options & opt,
     Vector3 camAxis = camPose.axis_angle();
 
     // Copy to cameras_vec
-    Vector<double, ModelT::camera_params_n> a;
-    subvector(a, 0, 3) = camCtr;
-    subvector(a, 3, 3) = ModelT::pose_scale*camAxis;
+    Vector<double, ModelT::camera_params_n> cam_params;
+    subvector(cam_params, 0, 3) = camCtr;
+    subvector(cam_params, 3, 3) = ModelT::pose_scale*camAxis;
     for (size_t q = 0; q < num_camera_params; q++)
-      cameras_vec[icam*num_camera_params + q] = a[q];
+      cameras_vec[icam*num_camera_params + q] = cam_params[q];
 
     // Intrinsics
     intrinsics_vec[0] = -100; // Focal length. Why it turns out negative?
@@ -207,7 +236,7 @@ struct BaReprojectionError {
         point_vec[p]  = (double)point[p];
 
       // Project the current point into the current camera
-      Vector2 prediction = (*m_ba_model)(m_ipt, m_icam, cam_vec, point_vec);
+      Vector2 prediction = (*m_ba_model).cam_pixel(m_ipt, m_icam, cam_vec, point_vec);
 
       // The error is the difference between the predicted and observed position,
       // normalized by sigma.
@@ -279,7 +308,7 @@ struct BaPinholeError {
         point_vec[p]  = (double)point[p];
 
       // Project the current point into the current camera
-      Vector2 prediction = (*m_ba_model)(m_ipt, m_icam, cam_intr_vec, point_vec);
+      Vector2 prediction = (*m_ba_model).cam_pixel(m_ipt, m_icam, cam_intr_vec, point_vec);
 
       // The error is the difference between the predicted and observed position,
       // normalized by sigma.
@@ -497,6 +526,10 @@ void do_ba_ceres(ModelT & ba_model, Options& opt ){
       Vector2 observation = (**fiter).m_location;
       Vector2 pixel_sigma = (**fiter).m_scale;
 
+      // This is a bugfix
+      if (pixel_sigma != pixel_sigma)
+        pixel_sigma = Vector2(1, 1);
+
       // Each observation corresponds to a pair of a camera and a point
       // which are identified by indices icam and ipt respectively.
       double * camera = cameras + icam * num_camera_params;
@@ -578,15 +611,16 @@ void do_ba_ceres(ModelT & ba_model, Options& opt ){
     asp::concat_extrinsics_intrinsics<ModelT>(&cameras_vec[icam*num_camera_params],
                                               intrinsics,
                                               concat); // output goes here
-    ba_model.set_A_parameters(icam, concat);
+    ba_model.set_cam_params(icam, concat);
   }
 
 }
 
+// The older approach, using VW's solver
 template <class AdjusterT>
-void do_ba(typename AdjusterT::model_type & ba_model,
-           typename AdjusterT::cost_type const& cost_function,
-           Options const& opt) {
+void do_ba_nonceres(typename AdjusterT::model_type & ba_model,
+                    typename AdjusterT::cost_type const& cost_function,
+                    Options const& opt) {
 
   AdjusterT bundle_adjuster(ba_model, cost_function, false, false);
 
@@ -608,7 +642,8 @@ void do_ba(typename AdjusterT::model_type & ba_model,
     ba_model.bundlevis_points_append(iterPointsFile);
   }
 
-  BundleAdjustReport<AdjusterT> reporter( "Bundle Adjust", ba_model, bundle_adjuster, opt.report_level );
+  BundleAdjustReport<AdjusterT> reporter("Bundle Adjust", ba_model, bundle_adjuster,
+                                          opt.report_level);
 
   double abs_tol = 1e10, rel_tol=1e10;
   double overall_delta = 2;
@@ -657,7 +692,7 @@ void save_cnet_as_csv(Options& opt, std::string const& cnetFile){
 
   vw_out() << "Writing: " << cnetFile << std::endl;
   std::ofstream ofs(cnetFile.c_str());
-  ofs.precision(17);
+  ofs.precision(18);
 
   int count = 0;
   ControlNetwork & cnet = *opt.cnet.get();
@@ -706,16 +741,16 @@ void do_ba_costfun(CostFunType const& cost_fun, Options& opt){
   if ( opt.ba_type == "ceres" ) {
     do_ba_ceres<ModelType>(ba_model, opt);
   } else if ( opt.ba_type == "robustsparse" ) {
-    do_ba<AdjustRobustSparse< ModelType,CostFunType> >(ba_model, cost_fun, opt);
+    do_ba_nonceres<AdjustRobustSparse< ModelType,CostFunType> >(ba_model, cost_fun, opt);
   } else if ( opt.ba_type == "robustref" ) {
-    do_ba<AdjustRobustRef< ModelType,CostFunType> >(ba_model, cost_fun, opt);
+    do_ba_nonceres<AdjustRobustRef< ModelType,CostFunType> >(ba_model, cost_fun, opt);
   } else if ( opt.ba_type == "sparse" ) {
-    do_ba<AdjustSparse< ModelType, CostFunType > >(ba_model, cost_fun, opt);
+    do_ba_nonceres<AdjustSparse< ModelType, CostFunType > >(ba_model, cost_fun, opt);
   }else if ( opt.ba_type == "ref" ) {
-    do_ba<AdjustRef< ModelType, CostFunType > >(ba_model, cost_fun, opt);
+    do_ba_nonceres<AdjustRef< ModelType, CostFunType > >(ba_model, cost_fun, opt);
   }
 
-  // Save the models to disk
+  // Save the models to disk.
   for (size_t icam = 0; icam < ba_model.num_cameras(); icam++){
     std::string adjust_file = asp::bundle_adjust_file_name(opt.out_prefix,
                                                            opt.image_files[icam],
@@ -785,7 +820,7 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
     ("robust-threshold", po::value(&opt.robust_threshold)->default_value(0.5),
                          "Set the threshold for robust cost functions.")
     ("datum",            po::value(&opt.datum_str)->default_value(""),
-                         "Use this datum (needed only if ground control points are used). [WGS_1984, D_MOON (radius is assumed to be 1,737,400 meters), D_MARS (radius is assumed to be 3,396,190 meters), etc.]")
+                         "Use this datum (needed only if ground control points are used). Options: WGS_1984, D_MOON (1,737,400 meters), D_MARS (3,396,190 meters), MOLA (3,396,000 meters), NAD83, WGS72, and NAD27. Also accepted: Earth (=WGS_1984), Mars (=D_MARS), Moon (=D_MOON).")
                          ("semi-major-axis",  po::value(&opt.semi_major)->default_value(0),
                          "Explicitly set the datum semi-major axis in meters (needed only if ground control points are used).")
     ("semi-minor-axis",  po::value(&opt.semi_minor)->default_value(0),
@@ -794,6 +829,10 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
                          "Select the stereo session type to use for processing. Options: pinhole isis dg rpc. Usually the program can select this automatically by the file extension.")
     ("min-matches",      po::value(&opt.min_matches)->default_value(30),
                          "Set the minimum  number of matches between images that will be considered.")
+    ("ip-detect-method",po::value(&opt.ip_detect_method)->default_value(0),
+                     "Interest point detection algorithm (0: Integral OBALoG (default), 1: OpenCV SIFT, 2: OpenCV ORB.")
+      ("individually-normalize",   po::bool_switch(&opt.individually_normalize)->default_value(false)->implicit_value(true),
+                     "Individually normalize the input images instead of using common values.")
     ("max-iterations",   po::value(&opt.max_iterations)->default_value(1000),
                          "Set the maximum number of iterations.")
     ("overlap-limit",    po::value(&opt.overlap_limit)->default_value(3),
@@ -804,13 +843,15 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
      "How many interest points to detect in each 1024^2 image tile (default: automatic determination).")
     ("min-triangulation-angle",             po::value(&opt.min_angle)->default_value(0.1),
      "The minimum angle, in degrees, at which rays must meet at a triangulated point to accept this point as valid.")
-
     ("lambda,l",         po::value(&opt.lambda)->default_value(-1),
                          "Set the initial value of the LM parameter lambda (ignored for the Ceres solver).")
     ("report-level,r",   po::value(&opt.report_level)->default_value(10),
                          "Use a value >= 20 to get increasingly more verbose output.");
 //     ("save-iteration-data,s", "Saves all camera information between iterations to output-prefix-iterCameraParam.txt, it also saves point locations for all iterations in output-prefix-iterPointsParam.txt.");
   general_options.add( asp::BaseOptionsDescription(opt) );
+
+  // TODO: When finding the min and max bounds, do a histogram, throw away 5% of points
+  // or something at each end.
 
   po::options_description positional("");
   positional.add_options()
@@ -848,6 +889,10 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
   // See if we start with initial cameras or no cameras
   opt.have_input_cams = (!opt.camera_files.empty()) || asp::images_are_cubes(opt.image_files);
 
+  // Copy the IP settings to the global stereosettings() object
+  asp::stereo_settings().ip_matching_method = opt.ip_detect_method;
+  asp::stereo_settings().individually_normalize = opt.individually_normalize;
+
   if (!opt.gcp_files.empty() || !opt.have_input_cams){
     // Need to read the datum if we have gcps.
     if (opt.datum_str != ""){
@@ -876,7 +921,7 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
               << usage << general_options  );
 
   // Create the output directory
-  asp::create_out_dir(opt.out_prefix);
+  vw::create_out_dir(opt.out_prefix);
 
   // Turn on logging to file
   asp::log_to_file(argc, argv, "", opt.out_prefix);
@@ -892,7 +937,8 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
           opt.ba_type == "ref"
           ) )
     vw_throw( ArgumentErr() << "Unknown bundle adjustment version: " << opt.ba_type
-                            << ". Options are: [Ceres, RobustSparse, RobustRef, Sparse, Ref]\n" );
+              << ". Options are: [Ceres, RobustSparse, RobustRef, Sparse, Ref]\n" );
+
 }
 
 int main(int argc, char* argv[]) {
@@ -924,14 +970,14 @@ int main(int argc, char* argv[]) {
       opt.stereo_session_string = "pinhole";
     }
 
-    // Create the stereo session. This will attempt to identify the
-    // session type.
+    // Create the stereo session. This will attempt to identify the session type.
     // Read in the camera model and image info for the input images.
     typedef boost::scoped_ptr<asp::StereoSession> SessionPtr;
     for (int i = 0; i < num_images; i++){
       vw_out(DebugMessage,"asp") << "Loading: " << opt.image_files [i] << ' '
                                                 << opt.camera_files[i] << "\n";
 
+      // The same camera is double-loaded into the same session instance.
       SessionPtr session(asp::StereoSessionFactory::create(opt.stereo_session_string, opt,
                                                            opt.image_files [i], opt.image_files [i],
                                                            opt.camera_files[i], opt.camera_files[i],
@@ -951,12 +997,24 @@ int main(int argc, char* argv[]) {
     }
 
     // Create the match points
+    // Iterate through each pair of input images
+    std::map< std::pair<int, int>, std::string> match_files;
+
     for (int i = 0; i < num_images; i++){
       for (int j = i+1; j <= std::min(num_images-1, i+opt.overlap_limit); j++){
+        // Load both images into a new StereoSession object and use it to find interest points.
+        // - The points are written to a file on disk.
         std::string image1 = opt.image_files[i];
         std::string image2 = opt.image_files[j];
-        std::string match_filename
-          = ip::match_filename(opt.out_prefix, image1, image2);
+        std::string match_filename = ip::match_filename(opt.out_prefix, image1, image2);
+
+        match_files[ std::pair<int, int>(i, j) ] = match_filename;
+
+        if (fs::exists(match_filename)) {
+          vw_out() << "\t--> Using cached match file: " << match_filename << "\n";
+          continue;
+        }
+
         boost::shared_ptr<DiskImageResource>
           rsrc1( DiskImageResource::open(image1) ),
           rsrc2( DiskImageResource::open(image2) );
@@ -969,23 +1027,37 @@ int main(int argc, char* argv[]) {
         session->get_nodata_values(rsrc1, rsrc2, nodata1, nodata2);
         try{
           // IP matching may not succeed for all pairs
+
+          // Get masked views of the images to get statistics from
+          DiskImageView<float> image1_view(image1), image2_view(image2);
+          ImageViewRef< PixelMask<float> > masked_image1
+            = create_mask_less_or_equal(image1_view,  nodata1);
+          ImageViewRef< PixelMask<float> > masked_image2
+            = create_mask_less_or_equal(image2_view, nodata2);
+          vw::Vector<vw::float32,6> image1_stats = asp::gather_stats(masked_image1, image1);
+          vw::Vector<vw::float32,6> image2_stats = asp::gather_stats(masked_image2, image2);
+
           session->ip_matching(image1, image2,
+                               Vector2(masked_image1.cols(), masked_image1.rows()),
+                               image1_stats,
+                               image2_stats,
                                opt.ip_per_tile,
                                nodata1, nodata2, match_filename,
                                opt.camera_models[i].get(),
                                opt.camera_models[j].get());
         } catch ( const std::exception& e ){
           vw_out(WarningMessage) << e.what() << std::endl;
-        }
+        } //End try/catch
       }
-    }
+    } // End loop through all input image pairs
 
     opt.cnet.reset( new ControlNetwork("BundleAdjust") );
     if ( opt.cnet_file.empty() ) {
       bool success = build_control_network( opt.have_input_cams,
                                             (*opt.cnet), opt.camera_models,
-                                            opt.image_files, opt.min_matches,
-                                            opt.out_prefix,
+                                            opt.image_files,
+                                            match_files,
+                                            opt.min_matches,
                                             opt.min_angle*(M_PI/180));
       if (!success) {
         vw_out() << "Failed to build a control network. Consider removing "

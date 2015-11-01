@@ -77,10 +77,6 @@ class PassThroughOptionParser(optparse.OptionParser):
                 else:
                     largs.append(e.opt_str)
 
-def die(msg, code=-1):
-    print >>sys.stderr, msg
-    sys.exit(code)
-
 class BBox:
     def __init__(self, x, y, width, height):
         self.x = x
@@ -162,8 +158,40 @@ def run_sparse_disp(args, opt):
         if num_threads > 0:
             sparse_args += ['--processes', str(num_threads)]
 
+    # Set the env variables needed by sparse_disp and its dependencies.
+    # We set those here as the LD_LIBRARY_PATH set below is not the
+    # right one for ASP executables.
+    if os.environ.get('ASP_PYTHON_MODULES_PATH') is None:
+        die('\nERROR: Must set the environmental variable ASP_PYTHON_MODULES_PATH.', code=2)
+    if os.environ.get('LD_LIBRARY_PATH') is None:
+        os.environ['LD_LIBRARY_PATH'] = os.environ.get('ASP_PYTHON_MODULES_PATH')
+    else:
+        os.environ['LD_LIBRARY_PATH'] = os.environ.get('LD_LIBRARY_PATH') + \
+                                        ":" + os.environ.get('ASP_PYTHON_MODULES_PATH')
+    if os.environ.get('PYTHONPATH') is None:
+        os.environ['PYTHONPATH'] = os.environ.get('ASP_PYTHON_MODULES_PATH')
+    else:
+        os.environ['PYTHONPATH'] = os.environ.get('ASP_PYTHON_MODULES_PATH') + ":" + \
+                                   os.environ.get('PYTHONPATH')
+
     stereo_run('sparse_disp', sparse_args, opt,
                msg='%d: Low-res correlation with sparse_disp' % Step.corr)
+
+# Do low-res correlation.
+def calc_lowres_disp(args, opt, sep):
+
+    if ( opt.seed_mode == 3 ):
+        run_sparse_disp(args, opt)
+    else:
+        tmp_args = args[:] # deep copy
+        tmp_args.extend(['--compute-low-res-disparity-only'])
+        # invoke here stereo_run to be able to see the output on screen
+        stereo_run('stereo_corr', tmp_args, opt, msg='')
+
+    # See if to attach a georef to D_sub and D_sub_spread.
+    tmp_args = args[:]
+    tmp_args.append('--attach-georeference-to-lowres-disparity')
+    run_and_parse_output("stereo_parse", tmp_args, sep, opt.verbose)
 
 def parse_corr_seed_mode(filename):
 
@@ -182,20 +210,6 @@ def parse_corr_seed_mode(filename):
     fh.close()
 
     return mode
-
-def get_prog_version(prog):
-    try:
-        p = subprocess.Popen([prog,"--version"], stdout=subprocess.PIPE)
-        out, err = p.communicate()
-    except:
-        raise Exception("Could not find: " + prog)
-    if p.returncode != 0:
-        raise Exception("Checking " + prog + " version caused errors")
-
-    m = re.match("^.*? ([\d\.]+)", out)
-    if not m:
-        raise Exception("Could not find " + prog + " version")
-    return m.group(1)
 
 def run_multiview(prog_name, args, extra_args, entry_point, stop_point,
                   verbose, settings):

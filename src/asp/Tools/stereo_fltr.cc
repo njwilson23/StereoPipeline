@@ -25,6 +25,7 @@
 #include <asp/Core/InpaintView.h>
 #include <asp/Core/ErodeView.h>
 #include <asp/Core/ThreadedEdgeMask.h>
+#include <asp/Sessions/StereoSession.h>
 
 using namespace vw;
 using namespace asp;
@@ -69,7 +70,7 @@ public:
     // We look a beyond the current tile, to avoid cutting blobs
     // if possible. Skinny blobs will be cut though.
     int bias = 2*int(ceil(sqrt(double(area))));
-    
+
     BBox2i bbox2 = bbox;
     bbox2.expand(bias);
     bbox2.crop(bounding_box(m_img));
@@ -101,7 +102,7 @@ per_tile_erode( ImageViewBase<ImageT> const& img) {
 template <class ViewT>
 struct MultipleDisparityCleanUp {
   typedef ImageViewRef< typename ViewT::pixel_type > result_type;
-  
+
   inline result_type operator()( ImageViewBase<ViewT> const& input, int N) {
 
     result_type out = input;
@@ -134,28 +135,46 @@ void write_good_pixel_and_filtered( ImageViewBase<ImageT> const& inputview,
                                     Options const& opt ) {
   // Write Good Pixel Map
   // Sub-sampling so that the user can actually view it.
-  float sub_scale =
-    float( min( inputview.impl().cols(),
-                     inputview.impl().rows() ) ) / 2048.0;
-  
+  double sub_scale = double( min( inputview.impl().cols(),
+                                inputview.impl().rows() ) ) / 2048.0;
+  if (sub_scale < 1) // Don't use a sub_scale less than one.
+    sub_scale = 1;
+
+  // Write out the good pixel map
+  std::string goodPixelFile = opt.out_prefix + "-GoodPixelMap.tif";
+  vw_out() << "Writing: " << goodPixelFile << std::endl;
+  ImageViewRef<  PixelRGB<uint8> > goodPixelImage
+    = subsample(apply_mask
+                (copy_mask
+                 (stereo::missing_pixel_image(inputview.impl()),
+                  create_mask(DiskImageView<vw::uint8>(opt.out_prefix+"-lMask.tif"), 0)
+                  )
+                 ), sub_scale);
+
+  // Determine if we can attach geo information to the output image
+  cartography::GeoReference left_georef;
+  bool has_left_georef = read_georeference(left_georef,  opt.out_prefix + "-L.tif");
+  bool has_nodata = false;
+  double nodata = -32768.0;
+
+  vw::cartography::GeoReference good_pixel_georef;
+  if (has_left_georef) {
+    // Account for scale. Note that goodPixelImage is not guaranteed to respect
+    // the sub_scale factor above, hence this calculation.
+    double good_pixel_scale = 0.5*( double(goodPixelImage.cols())/inputview.impl().cols()
+                                    + double(goodPixelImage.rows())/inputview.impl().rows());
+    good_pixel_georef = resample(left_georef, good_pixel_scale);
+  }
+
   asp::block_write_gdal_image
-    ( opt.out_prefix + "-GoodPixelMap.tif",
-      subsample
-      (apply_mask
-       (copy_mask
-        (stereo::missing_pixel_image(inputview.impl()),
-         create_mask(DiskImageView<vw::uint8>(opt.out_prefix+"-lMask.tif"), 0)
-         )
-        ),
-       sub_scale < 1 ? 1 : sub_scale
-       ),
-      opt, TerminalProgressCallback
-      ("asp", "\t--> Good Pxl Map: ") );
-  
+    ( goodPixelFile, goodPixelImage, has_left_georef, good_pixel_georef,
+      has_nodata, nodata,
+      opt, TerminalProgressCallback("asp", "\t--> Good pixel map: ") );
+
   bool removeSmallBlobs = (stereo_settings().erode_max_size > 0);
 
   string outF = opt.out_prefix + "-F.tif";
-    
+
   // Fill holes
   if(stereo_settings().enable_fill_holes) {
     // Generate a list of blobs below a maximum size
@@ -178,7 +197,9 @@ void write_good_pixel_and_filtered( ImageViewBase<ImageT> const& inputview,
       asp::block_write_gdal_image( outF,
                                    inpaint(inputview.impl(), smallHoleIndex,
                                            use_grassfire, default_inpaint_val),
-                                   opt, TerminalProgressCallback
+                                   has_left_georef, left_georef,
+                                   has_nodata, nodata, opt,
+                                   TerminalProgressCallback
                                    ("asp","\t--> Filtering: ") );
     }
     else { // Add small blob removal step
@@ -190,15 +211,19 @@ void write_good_pixel_and_filtered( ImageViewBase<ImageT> const& inputview,
                                    (inpaint(inputview.impl(),
                                             smallHoleIndex,
                                             use_grassfire,
-                                            default_inpaint_val)
-                                    ), opt, TerminalProgressCallback
+                                            default_inpaint_val) ),
+                                   has_left_georef, left_georef,
+                                   has_nodata, nodata, opt,
+                                   TerminalProgressCallback
                                    ("asp","\t--> Filtering: ") );
     }
-    
+
   } else { // No hole filling
     if (!removeSmallBlobs) { // Skip small blob removal
       vw_out() << "Writing: " << outF << endl;
-      asp::block_write_gdal_image( outF, inputview.impl(), opt,
+      asp::block_write_gdal_image( outF, inputview.impl(),
+                                   has_left_georef, left_georef,
+                                   has_nodata, nodata, opt,
                                    TerminalProgressCallback
                                    ("asp", "\t--> Filtering: ") );
     }
@@ -207,10 +232,12 @@ void write_good_pixel_and_filtered( ImageViewBase<ImageT> const& inputview,
       // Write out the image to disk, removing the blobs in the process
       vw_out() << "Writing: " << outF << endl;
       asp::block_write_gdal_image(outF, per_tile_erode(inputview.impl()),
-                                  opt, TerminalProgressCallback
+                                  has_left_georef, left_georef,
+                                  has_nodata, nodata, opt,
+                                  TerminalProgressCallback
                                   ("asp","\t--> Filtering: ") );
     }
-    
+
   } // End no hole filling case
 }
 
@@ -263,7 +290,7 @@ void stereo_filtering( Options& opt ) {
            apply_mask(asp::threaded_edge_mask(left_mask, 0,mask_buffer,1024)),
            apply_mask(asp::threaded_edge_mask(right_mask,0,mask_buffer,1024)));
       }
-      
+
       // This is only turned on for apollo. Blob detection doesn't
       // work too great when tracking a whole lot of spots. HiRISE
       // seems to keep breaking this so I've keep it turned off.
@@ -313,7 +340,7 @@ int main(int argc, char* argv[]) {
 
     vw_out() << "\n[ " << current_posix_time_string()
              << " ] : Stage 3 --> FILTERING \n";
-    
+
     // This is probably the right place in which to warn the user about
     // new hole filling behavior.
     vw_out(WarningMessage)
@@ -321,23 +348,23 @@ int main(int argc, char* argv[]) {
       << "It is suggested to use instead point2dem's analogous "
       << "functionality. It can be re-enabled using "
       << "--enable-fill-holes." << endl;
-    
+
     stereo_register_sessions();
-    
+
     bool verbose = false;
     vector<Options> opt_vec;
     string output_prefix;
     asp::parse_multiview(argc, argv, FilteringDescription(),
                          verbose, output_prefix, opt_vec);
     Options opt = opt_vec[0];
-    
+
     // Internal Processes
     //---------------------------------------------------------
     stereo_filtering( opt );
-    
+
     vw_out() << "\n[ " << current_posix_time_string()
              << " ] : FILTERING FINISHED \n";
-    
+
   } ASP_STANDARD_CATCHES;
 
   return 0;

@@ -16,19 +16,19 @@
 // __END_LICENSE__
 
 
-/// \file Sessions.h
-///
+#ifndef __ASP_TOOLS_JITTERADJUST_H__
+#define __ASP_TOOLS_JITTERADJUST_H__
 
-#include <asp/Sessions/StereoSession.h>
+#include <vw/Camera/CameraModel.h>
 
-#if defined(ASP_HAVE_PKG_ISISIO) && ASP_HAVE_PKG_ISISIO == 1
-#include <asp/Sessions/StereoSessionIsis.h>
-#endif
+namespace asp{
 
-#include <asp/Sessions/StereoSessionDG.h>
-#include <asp/Sessions/StereoSessionDGMapRPC.h>
-#include <asp/Sessions/StereoSessionNadirPinhole.h>
-#include <asp/Sessions/StereoSessionPinhole.h>
-#include <asp/Sessions/StereoSessionRPC.h>
+  void jitter_adjust(std::vector<std::string> const& image_files,
+                     std::vector<std::string> const& camera_files,
+                     std::vector< boost::shared_ptr<vw::camera::CameraModel> > const& camera_models,
+                     std::string const& out_prefix,
+                     std::string const& match_file,
+                     int num_threads);
+}
 
-#include <asp/Sessions/StereoSessionFactory.h>
+#endif // __ASP_TOOLS_JITTERADJUST_H__

@@ -19,13 +19,17 @@
 /// \file stereo_tri.cc
 ///
 
-#include <asp/Tools/stereo.h>
-#include <asp/Camera/RPCModel.h>
-#include <asp/Camera/RPCStereoModel.h>
-#include <asp/Core/BundleAdjustUtils.h>
 #include <vw/Cartography.h>
 #include <vw/Camera/CameraModel.h>
 #include <vw/Stereo/StereoView.h>
+
+#include <asp/Camera/RPCModel.h>
+#include <asp/Tools/stereo.h>
+#include <asp/Tools/jitter_adjust.h>
+
+// We must have the implementations of all sessions for triangulation
+#include <asp/Sessions/StereoSessionFactory.tcc>
+
 #include <ctime>
 
 using namespace vw;
@@ -193,7 +197,78 @@ stereo_error_triangulate( vector<DisparityT> const& disparities,
   return result_type( disparities, transforms, model, is_map_projected );
 }
 
+/// Bin the disparities, and from each bin get a disparity value.
+/// This will create a correspondence from the left to right image,
+/// which we save in the match format
+template <class DisparityT, class TXT>
+void compute_matches_from_disp(vector<DisparityT> const& disparities,
+                               vector<TXT>        const& transforms,
+                               std::string        const& match_file) {
 
+  VW_ASSERT( disparities.size() == 1 && transforms.size() == 2,
+               vw::ArgumentErr() << "Expecting two images and one disparity.\n" );
+  DisparityT const& disp = disparities[0]; // pull the disparity
+
+  // Transforms to compensate for alignment
+  TXT left_trans  = transforms[0];
+  TXT right_trans = transforms[1];
+
+  std::vector<vw::ip::InterestPoint> left_ip, right_ip;
+
+  // TODO: This must be proportional to how many adjustments have!
+  double max_num_matches = stereo_settings().num_matches_for_piecewise_adjustment;
+
+  double num_pixels = double(disp.cols()) * double(disp.rows());
+  if (num_pixels < max_num_matches) max_num_matches = num_pixels;
+
+  double bin_len = sqrt(num_pixels/max_num_matches);
+  VW_ASSERT( bin_len >= 1.0, vw::ArgumentErr() << "Expecting bin_len >= 1.\n" );
+
+  int lenx = round( disp.cols()/bin_len ); lenx = std::max(1, lenx);
+  int leny = round( disp.rows()/bin_len ); leny = std::max(1, leny);
+
+  // Iterate over bins.
+
+  vw_out() << "Computing interest point matches based on disparity.\n";
+  vw::TerminalProgressCallback tpc("asp", "\t--> ");
+  double inc_amount = 1.0 / double(lenx);
+  tpc.report_progress(0);
+
+  for (int binx = 0; binx < lenx; binx++) {
+
+    // Pick the disparity at the center of the bin
+    int posx = round( (binx+0.5)*bin_len );
+
+    for (int biny = 0; biny < leny; biny++) {
+
+      int posy = round( (biny+0.5)*bin_len );
+
+      if (posx >= disp.cols() || posy >= disp.rows()) continue;
+      typedef typename DisparityT::pixel_type DispPixelT;
+      DispPixelT dpix = disp(posx, posy);
+      if (!is_valid(dpix)) continue;
+
+      // De-warp left and right pixels to be in the camera coordinate system
+      Vector2 left_pix  = left_trans.reverse ( Vector2(posx, posy) );
+      Vector2 right_pix = right_trans.reverse( Vector2(posx, posy) + stereo::DispHelper(dpix) );
+
+      ip::InterestPoint lip, rip;
+      lip.x  = left_pix.x();  lip.y = left_pix.y();
+      rip.x = right_pix.x();  rip.y = right_pix.y();
+      left_ip.push_back(lip);
+      right_ip.push_back(rip);
+    }
+
+    tpc.report_incremental_progress( inc_amount );
+  }
+  tpc.report_finished();
+
+  vw_out() << "Determined " << left_ip.size()
+           << " interest point matches from disparity.\n";
+
+  vw_out() << "Writing: " << match_file << std::endl;
+  ip::write_binary_match_file(match_file, left_ip, right_ip);
+}
 
 namespace asp{
 
@@ -222,6 +297,11 @@ namespace asp{
                         Options const& opt){
 
     vw_out() << "Writing point cloud: " << point_cloud_file << "\n";
+    bool has_georef = true;
+    cartography::GeoReference georef = opt.session->get_georef();
+
+    bool has_nodata = false;
+    double nodata = -std::numeric_limits<float>::max(); // smallest float
 
     // TODO: Replace this with with a function call!
     if ( (opt.session->name() == "isis") || (opt.session->name() == "isismapisis")){
@@ -229,14 +309,16 @@ namespace asp{
       asp::write_approx_gdal_image
         ( point_cloud_file, shift,
           stereo_settings().point_cloud_rounding_error,
-          point_cloud, opt,
-          TerminalProgressCallback("asp", "\t--> Triangulating: "));
+          point_cloud,
+          has_georef, georef, has_nodata, nodata,
+          opt, TerminalProgressCallback("asp", "\t--> Triangulating: "));
     }else{
       asp::block_write_approx_gdal_image
         ( point_cloud_file, shift,
           stereo_settings().point_cloud_rounding_error,
-          point_cloud, opt,
-          TerminalProgressCallback("asp", "\t--> Triangulating: "));
+          point_cloud,
+          has_georef, georef, has_nodata, nodata,
+          opt, TerminalProgressCallback("asp", "\t--> Triangulating: "));
     }
 
   }
@@ -283,9 +365,13 @@ namespace asp{
       // center at (numx/2, numy/2). Iterate over that boundary.
       for (int x = numx/2-r; x <= numx/2+r; x++){
         for (int y = numy/2-r; y <= numy/2+r; y++){
+
           if ( x != numx/2-r && x != numx/2+r &&
-               y != numy/2-r && y != numy/2+r) continue; // skip inner points
-          if (x < 0 || y < 0 || x >= numx || y >= numy) continue; // out of bounds
+               y != numy/2-r && y != numy/2+r)
+            continue; // skip inner points
+
+          if (x < 0 || y < 0 || x >= numx || y >= numy)
+            continue; // out of bounds
 
           BBox2i box(x*tile_size[0], y*tile_size[1], tile_size[0], tile_size[1]);
           box.crop(bounding_box(point_cloud));
@@ -298,7 +384,8 @@ namespace asp{
           for (int px = 0; px < cropped_cloud.cols(); px++){
             for (int py = 0; py < cropped_cloud.rows(); py++){
               Vector3 xyz = subvector(cropped_cloud(px, py), 0, 3);
-              if (xyz == Vector3()) continue;
+              if (xyz == Vector3())
+                continue;
               points.push_back(xyz);
             }
           }
@@ -307,10 +394,9 @@ namespace asp{
           if (points.size() > 100)
             return find_approx_points_median(points);
 
-        }
-
-      }
-    }
+        }// end y loop
+      }// end x loop
+    }// end r loop
 
     // Have to use what we've got
     return find_approx_points_median(points);
@@ -356,7 +442,7 @@ void stereo_triangulation( string          const& output_prefix,
     // Collect the images, cameras, and transforms. The left image is
     // the same in all n-1 stereo pairs forming the n images multiview
     // system. Same for cameras and transforms.
-    vector<string> images;
+    vector<string> image_files, camera_files;
     vector< boost::shared_ptr<camera::CameraModel> > cameras;
     vector<typename SessionT::tx_type> transforms;
     for (int p = 0; p < (int)opt_vec.size(); p++){
@@ -367,11 +453,14 @@ void stereo_triangulation( string          const& output_prefix,
       boost::shared_ptr<SessionT> sPtr = boost::dynamic_pointer_cast<SessionT>(opt_vec[p].session);
 
       if (p == 0){ // The first image is the "left" image for all pairs.
-        images.push_back(opt_vec[p].in_file1);
+        image_files.push_back(opt_vec[p].in_file1);
+        camera_files.push_back(opt_vec[p].cam_file1);
         cameras.push_back(camera_model1);
         transforms.push_back(sPtr->tx_left());
       }
-      images.push_back(opt_vec[p].in_file2);
+
+      image_files.push_back(opt_vec[p].in_file2);
+      camera_files.push_back(opt_vec[p].cam_file2);
       cameras.push_back(camera_model2);
       transforms.push_back(sPtr->tx_right());
     }
@@ -397,10 +486,55 @@ void stereo_triangulation( string          const& output_prefix,
                                                           stereo_settings().far_universe_radius);
       }
     } catch (std::exception &e) {
-      std::cout << e.what() << std::endl;
+      vw_out() << e.what() << std::endl;
       vw_out(WarningMessage) << "Could not find the camera center. "
                              << "Will not be able to filter triangulated points by radius.\n";
     } // End try/catch
+
+    vector<PVImageT> disparity_maps;
+    for (int p = 0; p < (int)opt_vec.size(); p++){
+      disparity_maps.push_back(opt_vec[p].session->pre_pointcloud_hook(opt_vec[p].out_prefix+"-F.tif"));
+    }
+
+    // Piecewise adjustments for jitter
+    if (stereo_settings().image_lines_per_piecewise_adjustment > 0 &&
+        !stereo_settings().skip_computing_piecewise_adjustments){
+
+      std::string match_file = output_prefix + "-disp.match";
+      compute_matches_from_disp(disparity_maps, transforms, match_file);
+
+      int num_threads = opt_vec[0].num_threads;
+      if (opt_vec[0].session->name() == "isis" || opt_vec[0].session->name() == "isismapisis")
+        num_threads = 1;
+      asp::jitter_adjust(image_files, camera_files, cameras, output_prefix,
+                         match_file,  num_threads);
+    }
+
+    if (stereo_settings().compute_piecewise_adjustments_only) {
+      vw_out() << "Computed the piecewise adjustments. Will stop here." << endl;
+      return;
+    }
+
+    // Reload the cameras, loading the piecewise corrections for jitter.
+    if (stereo_settings().image_lines_per_piecewise_adjustment > 0) {
+
+      // Sanity check. We actually performed it already, this is just being
+      // extra cautious.
+      if (stereo_settings().bundle_adjust_prefix != "")
+        vw_throw( ArgumentErr() << "Since we perform piecewise adjustments to reduce jitter, "
+                  << "the input cameras should not have been bundle-adjusted.\n");
+
+      stereo_settings().bundle_adjust_prefix = output_prefix; // trigger loading adj cams
+      cameras.clear();
+      for (int p = 0; p < (int)opt_vec.size(); p++){
+
+        boost::shared_ptr<camera::CameraModel> camera_model1, camera_model2;
+        opt_vec[p].session->camera_models(camera_model1, camera_model2);
+        if (p == 0) // The first image is the "left" image for all pairs.
+          cameras.push_back(camera_model1);
+        cameras.push_back(camera_model2);
+      }
+    }
 
     // Strip the smart pointers and form the stereo model
     std::vector<const vw::camera::CameraModel *> camera_ptrs;
@@ -409,20 +543,15 @@ void stereo_triangulation( string          const& output_prefix,
       camera_ptrs.push_back(cameras[c].get());
     StereoModelT stereo_model( camera_ptrs, stereo_settings().use_least_squares );
 
-    vector<PVImageT> disparity_maps;
-    for (int p = 0; p < (int)opt_vec.size(); p++){
-      disparity_maps.push_back(opt_vec[p].session->pre_pointcloud_hook(opt_vec[p].out_prefix+"-F.tif"));
-    }
-
     // Apply radius function and stereo model in one go
     vw_out() << "\t--> Generating a 3D point cloud." << endl;
     ImageViewRef<Vector6> point_cloud = per_pixel_filter
-                                            (stereo_error_triangulate(disparity_maps, transforms, stereo_model, is_map_projected),
-                                             universe_radius_func);
+      (stereo_error_triangulate
+       (disparity_maps, transforms, stereo_model, is_map_projected),
+       universe_radius_func);
 
     // If we crop the left and right images, at each run we must
-    // recompute the cloud center, as the cropping windows may
-    // have changed.
+    // recompute the cloud center, as the cropping windows may have changed.
     bool crop_left_and_right =
       ( stereo_settings().left_image_crop_win  != BBox2i(0, 0, 0, 0)) &&
       ( stereo_settings().right_image_crop_win != BBox2i(0, 0, 0, 0) );
@@ -433,8 +562,7 @@ void stereo_triangulation( string          const& output_prefix,
       string cloud_center_file = output_prefix + "-PC-center.txt";
       if (!read_point(cloud_center_file, cloud_center) || crop_left_and_right){
         if (!stereo_settings().skip_point_cloud_center_comp) {
-          cloud_center
-            = find_point_cloud_center(opt_vec[0].raster_tile_size, point_cloud);
+          cloud_center = find_point_cloud_center(opt_vec[0].raster_tile_size, point_cloud);
           write_point(cloud_center_file, cloud_center);
         }
       }
@@ -524,16 +652,16 @@ int main( int argc, char* argv[] ) {
 #define INSTANTIATE(T,NAME) if ( opt_vec[0].session->name() == NAME ) { \
       stereo_triangulation<T>(output_prefix, opt_vec); }
 
-    INSTANTIATE(StereoSessionPinhole,           "pinhole"     );
-    INSTANTIATE(StereoSessionNadirPinhole,      "nadirpinhole");
-    INSTANTIATE(StereoSessionRPC,               "rpc"         );
-    INSTANTIATE(StereoSessionDG,                "dg"          );
-    INSTANTIATE(StereoSessionDGMapRPC,          "dgmaprpc"    );
-    INSTANTIATE(StereoSessionRPCMapRPC,         "rpcmaprpc"   );
-    INSTANTIATE(StereoSessionPinholeMapPinhole, "pinholemappinhole"   );
+    INSTANTIATE(StereoSessionPinhole,           "pinhole"           );
+    INSTANTIATE(StereoSessionNadirPinhole,      "nadirpinhole"      );
+    INSTANTIATE(StereoSessionRPC,               "rpc"               );
+    INSTANTIATE(StereoSessionDG,                "dg"                );
+    INSTANTIATE(StereoSessionDGMapRPC,          "dgmaprpc"          );
+    INSTANTIATE(StereoSessionRPCMapRPC,         "rpcmaprpc"         );
+    INSTANTIATE(StereoSessionPinholeMapPinhole, "pinholemappinhole" );
 #if defined(ASP_HAVE_PKG_ISISIO) && ASP_HAVE_PKG_ISISIO == 1
-    INSTANTIATE(StereoSessionIsis,         "isis"        );
-    INSTANTIATE(StereoSessionIsisMapIsis,  "isismapisis" );
+    INSTANTIATE(StereoSessionIsis,         "isis"                   );
+    INSTANTIATE(StereoSessionIsisMapIsis,  "isismapisis"            );
 #endif
 
 #undef INSTANTIATE

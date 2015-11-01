@@ -75,7 +75,8 @@ namespace asp {
 
   /// Utility for converting STEREOMODEL_TYPE into the corresponding class
   template <STEREOSESSION_STEREOMODEL_TYPE T> struct StereoModelType2Class { typedef vw::stereo::StereoModel type; };
-  template <> struct StereoModelType2Class<STEREOMODEL_TYPE_RPC>           { typedef asp::RPCStereoModel     type; };
+  // Unfortunately there is still a problems here that the unit test does not catch.
+  //template <> struct StereoModelType2Class<STEREOMODEL_TYPE_RPC>           { typedef asp::RPCStereoModel     type; };
 
   /// Utility returns true if our inputs are map projected.
   template <STEREOSESSION_DISKTRANSFORM_TYPE  DISKTRANSFORM_TYPE> struct IsTypeMapProjected { static const bool value=false; };
@@ -103,6 +104,11 @@ namespace asp {
     // Static copies of some of the characteristic functions defined in the base class.
     static bool isMapProjected() { return IsTypeMapProjected<DISKTRANSFORM_TYPE>::value; }
 
+    // Override the base class functions according to the class paramaters
+    virtual bool uses_map_projected_inputs() const {return  isMapProjected();}
+    virtual bool requires_input_dem       () const {return  isMapProjected();}
+    virtual bool supports_image_alignment () const {return !isMapProjected();}
+
     /// Verify that the inputs needed by the template configuration are selected
     /// - Derived classes should call this before initializing their own behavior.
     virtual void initialize(BaseOptions const& options,
@@ -115,8 +121,11 @@ namespace asp {
 
 
     /// Override the default ip_matching implementation so it just throws if we are using DISKTRANSFORM_TYPE_MAP_PROJECT
-    inline virtual bool ip_matching(std::string const& input_file1,
-                                    std::string const& input_file2,
+    inline virtual bool ip_matching(std::string  const& input_file1,
+                                    std::string  const& input_file2,
+                                    vw::Vector2  const& uncropped_image_size,
+                                    Vector6f const& stats1,
+                                    Vector6f const& stats2,
                                     int ip_per_tile,
                                     float nodata1, float nodata2,
                                     std::string const& match_filename,
@@ -139,7 +148,7 @@ namespace asp {
     tx_type tx_left () const;
     tx_type tx_right() const;
 
-    /// The type of sensor models created by this lass
+    /// The type of sensor models created by this class
     typedef typename StereoModelType2Class<STEREOMODEL_TYPE>::type stereo_model_type;
 /*
     /// Simple factory function

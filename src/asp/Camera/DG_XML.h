@@ -30,6 +30,7 @@
 #include <vw/Math/BBox.h>
 #include <vw/Math/Geometry.h>
 #include <vw/Cartography/GeoReference.h>
+#include <vw/Camera/CameraModel.h>
 #include <asp/Camera/XMLBase.h>
 
 #include <vector>
@@ -89,6 +90,8 @@ namespace asp {
     vw::Vector2 detector_origin;     // mm
     double      detector_rotation;    // degrees about Z+ in camera frame
     double      detector_pixel_pitch; // mm
+    
+    void printDebugInfo() const; ///< Debug string
   };
 
 

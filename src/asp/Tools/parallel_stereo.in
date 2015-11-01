@@ -176,7 +176,7 @@ def create_symlinks_for_multiview(settings, opt):
                 if os.path.lexists(dst_f): continue
                 os.symlink(rel_src, dst_f)
 
-def build_vrt( settings, postfix, tile_postfix, **kw ):
+def build_vrt(settings, georef, postfix, tile_postfix, **kw):
 
     image_size = settings["trans_left_image_size"]
 
@@ -185,6 +185,10 @@ def build_vrt( settings, postfix, tile_postfix, **kw ):
     f = open(vrt_file,'w')
     f.write("<VRTDataset rasterXSize=\"%i\" rasterYSize=\"%i\">\n" %
             (int(image_size[0]),int(image_size[1])) )
+
+    # Write the datum, projection, and georeference transform in XML format
+    f.write("  <SRS>" + georef["WKT"] + "</SRS>\n")
+    f.write("  <GeoTransform>" + georef["GeoTransform"] + "</GeoTransform>\n")
 
     tiles = produce_tiles( settings, opt.job_size_w, opt.job_size_h )
 
@@ -517,11 +521,8 @@ if __name__ == '__main__':
         p.print_help()
         die('\nERROR: Missing input files', code=2)
 
-    # This error will never be reached for users of our packaged final
-    # product as that one bundles 'parallel' with it.
-    ver = get_prog_version('parallel')
-    if ver < '2013':
-        die("Expecting a version of GNU parallel from at least 2013.")
+    # Ensure our 'parallel' is not out of date
+    check_parallel_version()
 
     if opt.threads_single is None:
         opt.threads_single = get_num_cpus()
@@ -567,11 +568,13 @@ if __name__ == '__main__':
     if opt.version:
         args.append('-v')
 
-    args_sub = args[:] # deep copy
-    args_sub.extend(['--compute-low-res-disparity-only'])
-
     sep = ","
     settings=run_and_parse_output( "stereo_parse", args, sep, opt.verbose )
+
+    sep2 = '--non-comma-separator--' # for values having commas which we don't want disturbed
+    georef=run_and_parse_output( "stereo_parse", args, sep2, opt.verbose )
+    georef["WKT"] = "".join(georef["WKT"])
+    georef["GeoTransform"] = "".join(georef["GeoTransform"])
 
     if opt.tile_id is None:
 
@@ -628,16 +631,13 @@ if __name__ == '__main__':
         if ( opt.entry_point <= step ):
             if ( opt.stop_point <= step ): sys.exit()
 
-            # First do low-res correlation, this happens just once.
-            if ( opt.seed_mode == 3 ):
-                run_sparse_disp(args, opt)
-            else:
-                single_run('stereo_corr',
-                           args_sub, msg='%d: Low-res correlation' % step)
-            create_subproject_dirs( settings ) # symlink D_sub
+            # Do low-res correlation, this happens just once.
+            calc_lowres_disp(args, opt, sep)
 
-            # Low-res correlation is done. Run full-res stereo
-            # using multiple processes.
+            # symlink D_sub
+            create_subproject_dirs( settings )
+
+            # Run full-res stereo using multiple processes.
             self_args.extend(['--skip-low-res-disparity-comp'])
             sprawn_to_nodes(step, settings, self_args)
 
@@ -647,7 +647,7 @@ if __name__ == '__main__':
             # build the vrt of all correlation tiles, and sym link
             # that vrt from all tile directories.
             rename_files( settings, "-D.tif", "-Dnosym.tif" )
-            build_vrt( settings, "-D.tif", "-Dnosym.tif" )
+            build_vrt(settings, georef, "-D.tif", "-Dnosym.tif")
             create_subproject_dirs( settings ) # symlink D.tif
 
         # Refinement
@@ -661,26 +661,37 @@ if __name__ == '__main__':
         step = Step.fltr
         if ( opt.entry_point <= step ):
             if ( opt.stop_point <= step ): sys.exit()
-            build_vrt( settings, "-RD.tif", "-RD.tif" )
+            build_vrt(settings, georef, "-RD.tif", "-RD.tif")
             single_run('stereo_fltr', args, msg='%d: Filtering' % step)
             create_subproject_dirs( settings ) # symlink F.tif
 
-        # Triangulation. First compute the point cloud center.
+        # Triangulation
         step = Step.tri
         if ( opt.entry_point <= step ):
             if ( opt.stop_point <= step ): sys.exit()
 
-            # First compute the point cloud center. This is done
-            # just once.
-            l_args = args[:] # deep copy
-            l_args.append('--compute-point-cloud-center-only')
-            single_run('stereo_tri',  l_args, msg='%d: Triangulation' % step)
-            create_subproject_dirs( settings ) # symlink cloud center
+            # First compute jitter correction (optional). Done just once per run.
+            if '--image-lines-per-piecewise-adjustment' in args:
+                tmp_args = args[:] # deep copy
+                tmp_args.extend('--compute-piecewise-adjustments-only')
+                single_run('stereo_tri',  tmp_args, msg='%d: Triangulation' % step)
+                # And don't do it again
+                args.extend(['--skip-computing-piecewise-adjustments'])
+                self_args.extend(['--skip-computing-piecewise-adjustments'])
 
-            # Next run triangulation on multiple machines
+            # Then compute the cloud center. Done once per run.
+            tmp_args = args[:] # deep copy
+            tmp_args.append('--compute-point-cloud-center-only')
+            single_run('stereo_tri',  tmp_args, msg='%d: Triangulation' % step)
+            # Point cloud center computation was done
             self_args.extend(['--skip-point-cloud-center-comp'])
+
+            # symlink the files just created
+            create_subproject_dirs( settings )
+
+            # Run triangulation on multiple machines
             sprawn_to_nodes(step, settings, self_args)
-            build_vrt( settings, "-PC.tif", "-PC.tif" ) # mosaic
+            build_vrt(settings, georef, "-PC.tif", "-PC.tif") # mosaic
 
     else:
 

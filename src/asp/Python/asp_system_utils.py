@@ -24,6 +24,24 @@ General system related utilities
 import sys, os, re, shutil, subprocess, string, time, errno, multiprocessing
 import os.path as P
 
+def die(msg, code=-1):
+    print >>sys.stderr, msg
+    sys.exit(code)
+
+def get_prog_version(prog):
+    try:
+        p = subprocess.Popen([prog,"--version"], stdout=subprocess.PIPE)
+        out, err = p.communicate()
+    except:
+        raise Exception("Could not find: " + prog)
+    if p.returncode != 0:
+        raise Exception("Checking " + prog + " version caused errors")
+
+    m = re.match("^.*? ([\d\.]+)", out)
+    if not m:
+        raise Exception("Could not find " + prog + " version")
+    return m.group(1)
+
 def get_num_cpus():
     """Return the number of CPUs on the current machine."""
 
@@ -80,7 +98,12 @@ def getNumNodesInList(nodesListPath):
 
     return num_nodes
 
-
+def check_parallel_version():
+    # This error will never be reached for users of our packaged final
+    # product as that one bundles 'parallel' with it.
+    ver = get_prog_version('parallel')
+    if ver < '2013':
+        die("Expecting a version of GNU parallel from at least 2013.")
 
 def runInGnuParallel(numParallelProcesses, commandString, argumentFilePath, parallelArgs=[], nodeListPath=None, verbose=False):
     """Use GNU Parallel to spread task across multiple computers and processes"""
@@ -89,9 +112,16 @@ def runInGnuParallel(numParallelProcesses, commandString, argumentFilePath, para
     if not checkIfToolExists('parallel'):
         raise Exception('Need GNU Parallel to distribute the jobs.')
 
+    # Ensure our 'parallel' is not out of date
+    check_parallel_version()
+
     # Use GNU parallel with given number of processes.
-    # - Let output be interspersed, read input series from file
-    cmd = ['parallel', '-u', '-a', argumentFilePath]
+    # Let output be interspersed, read input series from file
+    # Start in the same directory on remote machines. Ensure
+    # that vital env variables are copied over.
+    cmd = ['parallel',  '--workdir', os.getcwd(), '-u',
+           '--env', 'PATH', '--env', 'PYTHONPATH', '--env', 'ISISROOT',
+           '--env', 'ISIS3DATA', '-a', argumentFilePath]
 
     # Add number of processes if specified (default is one job per CPU core)
     if numParallelProcesses is not None:
@@ -115,13 +145,15 @@ def runInGnuParallel(numParallelProcesses, commandString, argumentFilePath, para
 
 # When user-exposed ASP executables are installed, they are in
 # 'bin'. Otherwise, in dev mode, they are in the same dir as __file__.
+# We prefer absolute paths below, in case some intermediate directories
+# do not exist.
 def bin_path(prog, **kw):
     currpath = kw.get('path', P.dirname(P.abspath(__file__)))
-    binpath = P.join(currpath, '..', 'bin', prog)
+    binpath = os.path.abspath(P.join(currpath, '..', 'bin', prog))
     if not P.isfile(binpath):
-        binpath = P.join(currpath, '..', 'Tools', prog)
+        binpath = os.path.abspath(P.join(currpath, '..', 'Tools', prog))
     if not P.isfile(binpath):
-        binpath = P.join(currpath, prog)
+        binpath = os.path.abspath(P.join(currpath, prog))
     return binpath
 
 # When hidden ASP executables are installed, they are in
@@ -129,11 +161,11 @@ def bin_path(prog, **kw):
 # __file__.
 def libexec_path(prog, **kw):
     currpath = kw.get('path', P.dirname(P.abspath(__file__)))
-    libexecpath = P.join(currpath, '..', 'libexec', prog)
+    libexecpath = os.path.abspath(P.join(currpath, '..', 'libexec', prog))
     if not P.isfile(libexecpath):
-        libexecpath = P.join(currpath, '..', 'Tools', prog)
+        libexecpath = os.path.abspath(P.join(currpath, '..', 'Tools', prog))
     if not P.isfile(libexecpath):
-        libexecpath = P.join(currpath, prog)
+        libexecpath = os.path.abspath(P.join(currpath, prog))
 
     if not P.isfile(libexecpath):
         # Could not find prog in libexec either. We will come
@@ -197,6 +229,10 @@ def run_and_parse_output(cmd, args, sep, verbose, **kw ):
         print(stderr)
         raise Exception('Failed executing: ' + " ".join(call))
     data = {}
+    if verbose:
+        if stdout is not None: print(stdout)
+        if stderr is not None: print(stderr)
+
     for line in stdout.split('\n'):
 
         # Print warning messages to stdout
@@ -205,7 +241,7 @@ def run_and_parse_output(cmd, args, sep, verbose, **kw ):
         if sep in line:
             keywords = line.split(sep)
             for index, item in enumerate(keywords):
-                # Strip whitespace
+                # Strip whitespace from ends
                 keywords[index] = item.strip(' \t\n\r')
             data[keywords[0]] = keywords[1:]
 

@@ -32,7 +32,7 @@
 
 namespace asp {
 
-  class StereoSessionNadirPinhole : public StereoSessionConcrete<DISKTRANSFORM_TYPE_MATRIX, STEREOMODEL_TYPE_PINHOLE>{
+  class StereoSessionNadirPinhole : public StereoSessionPinhole{
   public:
     virtual ~StereoSessionNadirPinhole() {}
 
@@ -46,6 +46,9 @@ namespace asp {
                                          std::string      & right_output_file);
 
     static StereoSession* construct() { return new StereoSessionNadirPinhole; }
+
+    virtual bool is_nadir_facing          () const {return true;}
+
   };
 
 }

@@ -1,17 +1,87 @@
-*** RELEASE 2.5.2, upcoming! ***
+*** RELEASE 2.5.2, Feb 29, 2015 ***
+
+Highlights
+
+- Added a constellation of features and tools to support solving for
+  the positions of input images lacking position information.  Can be used
+  for aerial imagery with innaccurate or incomplete pose information,
+  images from low cost drones, historical images lacking metadata, 
+  and images taken with handheld cameras.
+
+ - camera_solve
+   * New tool which adds support for aerial imagery etc as described above.
+   * Uses the THEIA library (http://www.theia-sfm.org/index.html)
+     to compute camera positions and orientations where no metadata is available. 
+   * Ground control points and estimated camera positions
+     can be used to find absolute camera positions.
+    * Added section to documentation describing ways to use ASP to 
+      process imagery from NASA's IceBridge program.
+
+ - camera_calibrate
+    * A convenience camera calibration tool that is a wrapper around
+      the OpenCV checkerboard calibration program with outputs in
+      formats for camera_solve and ASP.
+
+ - bundle_adjust
+    * Added several options to support solving for pinhole camera
+      models in local coordinates using GCPs or estimated camera positions.
+    * Improved filtering options for which images are IP-matched.
+
+ - orbitviz
+    * Significantly improved the accuracy of the plotted camera locations.
+    * Added option to load results from camera_solve.
+
+ - wv_correct
+    * Now corrects TDI 8 (Reverse) of WV01 and TDI 8 (Forward 
+      and Reverse) and TDI 32 (Forward) of WV02.  Other correction
+      behavior is unchanged.
+
+ - stereo_corr
+   * Added the ability to filter large disparities from D_sub that 
+     can greatly slow down a run. The options are --rm-quantile-percentile
+     and --rm-quantile-multiple. 
+
+ - undistort_image
+    * A new tool to test out pinhole model lens distortion parameters.
+    
+ - Lens distortion models:
+    * Switched from binary .pinhole file format to updated version of
+      the old plain text .tsai file format.
+    * Added support for Photometrix camera calibration parameters.
+    * New appendix to the documentation describing the .tsai file format
+      and supported lens distortion models.
+    
+Other
+
+ - Tools
+    * Suppressed pesky aux.xml warning sometimes printed by GDAL.
+    * Removed the long-deprecated orthoproject tool.
+    * Added icebridge_kmz_to_csv and lvis2kml utilities.
+
+ - point2las
+    * Write correct bounding box in the header.
+    * Respect projections that are not lon-lat.
+
+ - point2dem
+    * Increased speed of erode option.
+   
+ - docs
+    * Mention DERT, a tool for exploring large DEMs.
+    * Added new section describing camera_solve tool in detail.
+
+*** RELEASE 2.5.1, November 13, 2015 ***
+
+Highlights
 
  - stereo
+    * Added jitter correction for Digital Globe linescan imagery.
     * Bugfix for stereo with map-projected images using the RPC
       session (e.g, for map-projected Pleiades imagery).
     * Added OpenCV-based SIFT and ORB interest point finding options.
-    * Added jitter correction for linescan imagery.
-    * If the input images are map-projected (georeferenced) and 
-      alignment method is none, all image outputs of stereo are
-      georeferenced as well, such as GoodPixelMap, D_sub, disparity,
-      etc. As such, all these data can be overlayed in stereo_gui.
-    * The output point cloud saves datum info from input images
-      (even when the inputs are not georeferenced). 
-    * Increased reliability of interest point detection.
+
+ - bundle_adjust
+    * Much improved convergence for Digital Globe cameras.
+    * Added OpenCV-based SIFT and ORB interest point finding options.
 
  - point2dem, point2las, and pc_align
    * The datum (-r <planet> or --semi-major-axis) is optional now.
@@ -20,8 +90,6 @@
      for bodies that are not Moon, Mars, or Earth. The datum and
      projection can still be overridden with --reference-spheroid (or
      --datum) and --t_srs. 
-  * Accept --datum (-r) MOLA, as a shortcut for the sphere with
-     radius 3,396,000 meters.
 
  - dem_mosaic
    * Introduce --priority-blending-length, measured in input pixels. 
@@ -31,6 +99,36 @@
      smaller high-resolution "foreground" DEMs and larger
      lower-resolution "background" DEMs that should be specified later
      in the list. Changing --weights-exponent can improve transition.
+
+ - pc_align
+  * Added the ability to compute a manual rotation + translation +
+    scale transform based on user-selected point correspondences
+    from reference to source cloud in stereo_gui.
+
+ - stereo_gui
+   * Added the ability to generate ground control point (GCP) files
+     for bundle_adjust by picking features. In addition to the images
+     to be bundle-adjusted, one should provide a georeferenced image to find
+     the GCP lon-lat, and a reference DEM to find the GCP heights.
+
+Other
+
+ - stereo
+    * If the input images are map-projected (georeferenced) and 
+      alignment method is none, all image outputs of stereo are
+      georeferenced as well, such as GoodPixelMap, D_sub, disparity,
+      etc. As such, all these data can be overlayed in stereo_gui.
+    * The output point cloud saves datum info from input images
+      (even when the inputs are not georeferenced). 
+    * Increased reliability of interest point detection.
+    * Decreased the default timeout to 900 seconds. This still needs
+      tuning and a permanent solution is necessary.
+
+ - point2dem, point2las, and pc_align
+  * Accept --datum (-r) MOLA, as a shortcut for the sphere with
+     radius 3,396,000 meters.
+
+ - dem_mosaic
    * Fix an issue with minor jumps across tiles. 
    * Introduce --save-dem-weight <index>. Saves the weight image that
      tracks how much the input DEM with given index contributed to the
@@ -48,12 +146,9 @@
      (2009 or earlier) Digital Globe images.
 
  - stereo_gui
-   * Added the ability to generate ground control point files for
-     bundle_adjust. In addition to the images to be bundle-adjusted,
-     one should provide a georeferenced image to find the GCP lon-lat,
-     and a reference DEM to find the GCP heights (not fully mature).
    * Added the option --match-file to view interest point matches.
-   * Added the option --delete-temporary-files-on-exit.
+   * Added the options --delete-temporary-files-on-exit and
+     --create-image-pyramids-only.
    * Can read the georeference of map-projected ISIS cubes.
 
  - point2dem
@@ -72,15 +167,9 @@
  - pc_align
   * Upgraded to the latest libpointmatcher. This may result in minor
     alignment changes as the core algorithm got modified.
-  * Added the ability to compute a manual rotation + translation +
-    scale transform based on user-selected point correspondences
-    from reference to source cloud in stereo_gui.
   * Save all PC clouds with datum and projection info, if present. Add
     comment lines with the datum and projection to CSV files.
 
- - bundle_adjust
-    * Added OpenCV-based SIFT and ORB interest point finding options.
- 
  - geodiff
    * Bugfix when the two DEMs have longitudes offset by 360 degrees.
 

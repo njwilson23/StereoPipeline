@@ -74,10 +74,6 @@
 */
 
 
-// Find the best fitting rotation + translation + scale transform among
-// the two sets of points represented as matrix columns.
-Eigen::Affine3d Find3DAffineTransform(Eigen::Matrix3Xd in, Eigen::Matrix3Xd out);
-
 typedef double RealT; // We will use doubles in libpointmatcher.
 
 // This stuff is from the libpointmatcher library

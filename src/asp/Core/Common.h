@@ -61,6 +61,15 @@ namespace asp {
   /// Returns true if the file has an extension which is tif or ntf
   bool has_tif_or_ntf_extension( std::string const& input );
 
+  /// Returns true if all of the input files have the given extension.
+  bool all_files_have_extension(std::vector<std::string> const& files, std::string const& ext);
+  
+  /// Makes a vector containing all files in the input vector with an extension.
+  /// - If prune_input_list is set, matching files are removed from the input list.
+  std::vector<std::string>
+  get_files_with_ext( std::vector<std::string>& files, std::string const& ext, 
+                      bool prune_input_list );
+
   /// Parse the list of files specified as positional arguments on the command lin
   bool parse_multiview_cmd_files(std::vector<std::string> const &filesIn,
                                  std::vector<std::string>       &image_paths,
@@ -91,7 +100,6 @@ namespace asp {
     vw::DiskImageResourceGDAL::Options gdal_options;
     vw::Vector2i raster_tile_size;
     vw::int32    num_threads;
-    std::string  cache_dir;
     std::string  tif_compress;
     static int   corr_tile_size() { return 1024; } // Tile size for correlation
     static int   rfne_tile_size() { return 256;  } // Tile size for refinement
@@ -331,6 +339,26 @@ namespace asp {
                                  double nodata,
                                  BaseOptions & opt,
                                  vw::ProgressCallback const& tpc);
+
+
+  // TODO: Replace with something else!
+  /// Convenience class for setting flags and later on
+  ///  making sure that we set all of them.
+  /// - Designed to be inherited from.
+  class BitChecker {
+    std::bitset<32> m_checksum; ///< Store current bits
+    std::bitset<32> m_good;     ///< Store target bits
+
+  protected:
+    /// Used to check off that one of the arguments has been read.
+    void check_argument( vw::uint8 arg );
+
+  public:
+    /// Pass in the number of expected arguments, max 32
+    BitChecker( vw::uint8 num_arguments );
+
+    bool is_good() const; ///< Return true if all arguments have been checked.
+  }; // End class BitChecker
 
 } // end namespace asp
 

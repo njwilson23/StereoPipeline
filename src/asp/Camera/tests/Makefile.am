@@ -22,11 +22,11 @@
 
 if MAKE_MODULE_CAMERA
 
-# Temporarily moved tests to Session/tests, as they depend on Session
+TestRPCStereoModel_SOURCES  = TestRPCStereoModel.cxx
+TestDGCameraModel_SOURCES  = TestDGCameraModel.cxx
+TestSpotCameraModel_SOURCES  = TestSpotCameraModel.cxx
 
-#TestRPCStereoModel_SOURCES  = TestRPCStereoModel.cxx
-
-#TESTS = TestRPCStereoModel
+TESTS = TestDGCameraModel TestRPCStereoModel TestSpotCameraModel
 
 endif
 

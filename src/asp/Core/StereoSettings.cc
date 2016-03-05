@@ -94,7 +94,6 @@ namespace asp {
 
     double nan = std::numeric_limits<double>::quiet_NaN();
     nodata_value = nan;
-    max_valid_triangulation_error = nan;
   }
 
   // Define our options that are available
@@ -152,6 +151,15 @@ namespace asp {
                      "Disparity search range. Specify in format: hmin vmin hmax vmax.")
       ("corr-max-levels",        po::value(&global.corr_max_levels)->default_value(5),
                      "Max pyramid levels to process when using the integer correlator. (0 is just a single level).")
+      // TODO: These parameters are used here, but are only set as filter options.
+      //("rm-min-matches",      po::value(&global.rm_min_matches)->default_value(60),
+      //                        "Minimum number of pixels to be matched to keep sample (for filter mode 2).")
+      //("rm-threshold",        po::value(&global.rm_threshold)->default_value(3),
+      //                        "Maximum distance between samples to be considered still matched (for filter mode 2).")
+      ("rm-quantile-percentile",  po::value(&global.rm_quantile_percentile)->default_value(0.85),
+                              "Filter out pixels in D_sub where disparity > multiple*quantile.")
+      ("rm-quantile-multiple",    po::value(&global.rm_quantile_multiple)->default_value(-1),
+                              "Filter out pixels in D_sub where disparity > multiple*quantile.  Set >0 to enable.")
       ("skip-low-res-disparity-comp", po::bool_switch(&global.skip_low_res_disparity_comp)->default_value(false)->implicit_value(true),
                      "Skip the low-resolution disparity computation. This option is used in parallel_stereo.")
       ("compute-low-res-disparity-only", po::bool_switch(&global.compute_low_res_disparity_only)->default_value(false)->implicit_value(true),
@@ -162,7 +170,7 @@ namespace asp {
                      "Error (in meters) of the disparity estimation DEM.")
       ("use-local-homography",   po::bool_switch(&global.use_local_homography)->default_value(false)->implicit_value(true),
                      "Apply a local homography in each tile.")
-      ("corr-timeout",           po::value(&global.corr_timeout)->default_value(1800),
+      ("corr-timeout",           po::value(&global.corr_timeout)->default_value(900),
                      "Correlation timeout for a tile, in seconds.");
 
     po::options_description backwards_compat_options("Aliased backwards compatibility options");
@@ -253,16 +261,15 @@ namespace asp {
                                             "Radius of inner boundary of universe in meters (remove points with radius smaller than that).")
       ("far-universe-radius",               po::value(&global.far_universe_radius)->default_value(0.0),
                                             "Radius of outer boundary of universe in meters (remove points with radius larger than that).")
-      ("max-valid-triangulation-error",     po::value(&global.max_valid_triangulation_error),
-                                            "Points with triangulation error larger than this are removed from the cloud.")
       ("use-least-squares",                 po::bool_switch(&global.use_least_squares)->default_value(false)->implicit_value(true),
                                             "Use rigorous least squares triangulation process. This is slow for ISIS processes.")
       ("bundle-adjust-prefix", po::value(&global.bundle_adjust_prefix),
        "Use the camera adjustments obtained by previously running bundle_adjust with this output prefix.")
-      ("image-lines-per-piecewise-adjustment", po::value(&global.image_lines_per_piecewise_adjustment)->default_value(0), "A positive value, e.g., 2000, will turn on using piecewise camera adjustments to help reduce jitter effects. Use one adjustment per this many image lines.")
+      ("image-lines-per-piecewise-adjustment", po::value(&global.image_lines_per_piecewise_adjustment)->default_value(0), "A positive value, e.g., 1000, will turn on using piecewise camera adjustments to help reduce jitter effects. Use one adjustment per this many image lines.")
       ("piecewise-adjustment-percentiles",     po::value(&global.piecewise_adjustment_percentiles)->default_value(Vector2(5, 95), "5 95"), "A narrower range will place the piecewise adjustments for jitter correction closer together and further from the first and last lines in the image.")
       ("piecewise-adjustment-interp-type", po::value(&global.piecewise_adjustment_interp_type)->default_value(1), "How to interpolate between adjustments. [1 Linear, 2 Using Gaussian weights]")
       ("num-matches-for-piecewise-adjustment", po::value(&global.num_matches_for_piecewise_adjustment)->default_value(90000), "How many matches among images to create based on the disparity for the purpose of solving for jitter using piecewise adjustment.")
+      ("piecewise-adjustment-camera-weight", po::value(&global.piecewise_adjustment_camera_weight)->default_value(1.0), "The weight to use for the sum of squares of adjustments component of the cost function. Increasing this value will constrain the adjustments to be smaller.")
       ("point-cloud-rounding-error",        po::value(&global.point_cloud_rounding_error)->default_value(0.0),
                                             "How much to round the output point cloud values, in meters (more rounding means less precision but potentially smaller size on disk). The inverse of a power of 2 is suggested. Default: 1/2^10 for Earth and proportionally less for smaller bodies.")
       ("save-double-precision-point-cloud", po::bool_switch(&global.save_double_precision_point_cloud)->default_value(false)->implicit_value(true),
@@ -298,7 +305,10 @@ namespace asp {
       ("match-file", po::value(&global.match_file)->default_value(""),
        "Display this match file instead of looking one up based on existing conventions (implies --view-matches).")
       ("delete-temporary-files-on-exit",   po::bool_switch(&global.delete_temporary_files_on_exit)->default_value(false)->implicit_value(true),
-                            "Delete any subsampled and other files created by the GUI when exiting.");
+       "Delete any subsampled and other files created by the GUI when exiting.")
+      ("create-image-pyramids-only",   po::bool_switch(&global.create_image_pyramids_only)->default_value(false)->implicit_value(true),
+       "Without starting the GUI, build multi-resolution pyramids for the inputs, to be able to load them fast later.")
+      ;
   }
 
   DGDescription::DGDescription() : po::options_description("DG Options") {

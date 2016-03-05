@@ -1,0 +1,91 @@
+Here we describe how CCD artifacts in WorldView imagery are are
+tabulated and then corrected. This code needs more polishing,
+the goal for now is to have it documented and checked in.
+
+Basic idea
+----------
+
+For each TDI perform several runs. For each run, average all rows of
+the disparity (ignore invalid disparities).  Average these over
+multiple runs. We get n Vector2 values (since each valid disparity
+pixel is a Vector2), where n is the image width. From these, we will
+extract the locations of CCD jumps and their values in x and in
+y. Those will be hard-coded in asp/Tools/wv_correct.cc.
+
+Detailed instructions
+---------------------
+
+1. Choose a satellite (WV1 or WV2; this approach does not work for
+WV3), a TDI (values are various multiples of 8 from 8 to 64), and a
+scan direction (forward or reverse). (All this information can be
+found in the XML files.)
+
+2. Create a work directory. Have there at least 5-10 image sets for
+the desired satellite/TDI/scan direction combination, with reasonably
+flat terrain, little or no clouds, and reasonable amount of detail.
+
+3. Build ASP in dev mode. Ensure that the Tools and WVCorrect
+directories are in your path.
+
+4. Optionally run dg_mosaic to mosaic the left and right
+images/cameras for each image set. This will create a stereo pair.  In
+practice it is easier not to mosaic, but to pick one left and one
+right image from the existing data.
+
+5. For each stereo pair, inspect the left and right images in stereo_gui.
+Select corresponding areas to run stereo on. Each such area must have
+little or no clouds and must be as wide as the whole image.
+
+6. In the directory for each stereo pair, run the script run_lr.sh
+(see inside of it for usage). Note that you may pass in crop windows
+to use. This will do two stereo runs, from left to right, and in reverse.
+The outputs will be saved in 'run_lr' and 'run_rl'.
+
+In the directory for each stereo pair, have a dem.tif file
+pointing to a pre-existing DEM of the area covered by the images.
+This is optional, but it is queried to find the projection 
+to use in point2dem during the execution of run_lr.sh.
+
+7. Inspect the obtained F.tif disparities. Crop away some top and
+bottom rows if they are incomplete or have noise. You will have to
+redo the step "disp_avg" from run_lr.sh. The result will be "dx.txt"
+and "dy.txt" files having averaged disparities.
+   
+8. Start Matlab. Add your WVCorrect directory to the path, for example
+use 
+
+addpath(genpath('/home/USER/projects/StereoPipeline/src/asp/WVCorrect'))
+
+9. In Matlab, create an entry for each run you made, for example, as
+
+dirs={'run1/run_lr', 'run1/run_rl', 'run2/run_lr', 'run2/run_rl'};
+
+pitches=zeros(length(dirs), 1) + 8.0e-3;
+
+It is important to verify that the pitches in each XML file are indeed
+8.0e-03 (search for <DETPITCH>). Otherwise fill in the correct values
+in the 'pitches' array. 
+
+The script gen_scandir.pl can be helpful in parsing XML files
+to extract information on pitches, etc.
+
+10. Run
+
+do_find = 1;
+fig_no = 1;
+find_ccds(do_find, dirs, pitches, fig_no);
+
+This will save the CCD corrections to files, from there they can be hard-coded
+in wv_correct.cc. 
+
+11. It is quite likely the previous step will result in very noisy curves.
+Those need to be eliminated, by excluding the noisy runs altogether, or by
+cropping F.tif even further and redoing "disp_avg".
+
+Be prepared for a lot of manual iterative work over many days.
+
+12. The script fix_ccds.m can be used to tweak the CCD jumps from the GUI.
+
+13. Recompile wv_correct.cc. Run it to get corrected images. Redo
+stereo and point2dem. Examine if the IntersectionError.tif file looks
+better than before.

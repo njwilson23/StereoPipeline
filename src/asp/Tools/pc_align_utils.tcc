@@ -46,63 +46,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Find the best fitting rotation + translation + scale transform among
-// the two sets of points represented as matrix columns.
-Eigen::Affine3d Find3DAffineTransform(Eigen::Matrix3Xd in, Eigen::Matrix3Xd out) {
-  // Default output
-  Eigen::Affine3d A;
-  A.linear() = Eigen::Matrix3d::Identity(3, 3);
-  A.translation() = Eigen::Vector3d::Zero();
 
-  if (in.cols() != out.cols())
-    throw "Find3DAffineTransform(): input data mis-match";
-
-  // First find the scale, by finding the ratio of sums of some distances,
-  // then bring the datasets to the same scale.
-  double dist_in = 0, dist_out = 0;
-  for (int col = 0; col < in.cols()-1; col++) {
-    dist_in  += (in.col(col+1) - in.col(col)).norm();
-    dist_out += (out.col(col+1) - out.col(col)).norm();
-  }
-  if (dist_in <= 0 || dist_out <= 0)
-    return A;
-  double scale = dist_out/dist_in;
-  out /= scale;
-
-  // Find the centroids then shift to the origin
-  Eigen::Vector3d in_ctr = Eigen::Vector3d::Zero();
-  Eigen::Vector3d out_ctr = Eigen::Vector3d::Zero();
-  for (int col = 0; col < in.cols(); col++) {
-    in_ctr  += in.col(col);
-    out_ctr += out.col(col);
-  }
-  in_ctr /= in.cols();
-  out_ctr /= out.cols();
-  for (int col = 0; col < in.cols(); col++) {
-    in.col(col)  -= in_ctr;
-    out.col(col) -= out_ctr;
-  }
-
-  // SVD
-  Eigen::MatrixXd Cov = in * out.transpose();
-  Eigen::JacobiSVD<Eigen::MatrixXd> svd(Cov, Eigen::ComputeThinU | Eigen::ComputeThinV);
-
-  // Find the rotation
-  double d = (svd.matrixV() * svd.matrixU().transpose()).determinant();
-  if (d > 0)
-    d = 1.0;
-  else
-    d = -1.0;
-  Eigen::Matrix3d I = Eigen::Matrix3d::Identity(3, 3);
-  I(2, 2) = d;
-  Eigen::Matrix3d R = svd.matrixV() * I * svd.matrixU().transpose();
-
-  // The final transform
-  A.linear() = scale * R;
-  A.translation() = scale*(out_ctr - R*in_ctr);
-
-  return A;
-}
 
 /// Analyze a file name to determine the file type
 std::string get_file_type(std::string const& file_name){
@@ -261,7 +205,7 @@ int load_csv_aux(std::string const& file_name, int num_points_to_load,
                           << "line of file: " << file_name << "\n" );
   }
 
-  if (csv_conv.csv_format_str == ""){
+  if (!csv_conv.is_configured()){
     if (numTokens > 20){
       is_lola_rdr_format = true;
       if (verbose)
@@ -273,6 +217,7 @@ int load_csv_aux(std::string const& file_name, int num_points_to_load,
                      << " to be in latitude,longitude,height above datum (meters) format.\n";
     }
   }
+  // TODO: We parse these guessed file types manually but we should use a CsvConv object to do it!!!!!
 
   if (is_lola_rdr_format && geo.datum().semi_major_axis() != geo.datum().semi_minor_axis() ){
     vw_throw( vw::ArgumentErr() << "The CSV file was detected to be in the"
@@ -293,6 +238,7 @@ int load_csv_aux(std::string const& file_name, int num_points_to_load,
     if (!asp::is_valid_csv_line(line))
       continue;
 
+    // Randomly skip a percentage of points
     double r = (double)std::rand()/(double)RAND_MAX;
     if (r > load_ratio)
       continue;
@@ -303,37 +249,34 @@ int load_csv_aux(std::string const& file_name, int num_points_to_load,
     vw::Vector3 xyz;
     double lon = 0.0, lat = 0.0;
 
-    if (csv_conv.csv_format_str != ""){
+    if (csv_conv.is_configured()){
 
       // Parse custom CSV file with given format string
       bool success;
-      vw::Vector3 vals = csv_conv.parse_csv_line(is_first_line, success, line);
+      asp::CsvConv::CsvRecord vals = csv_conv.parse_csv_line(is_first_line, success, line);
       if (!success)
         continue;
 
-      bool return_point_height = false; // will return xyz
-      xyz = csv_conv.csv_to_cartesian_or_point_height(vals, geo, return_point_height);
+      xyz = csv_conv.csv_to_cartesian(vals, geo);
 
       // Decide if the point is in the box. Also save for the future
-      // the longitude of the point, we'll use it to compute the mean
-      // longitude.
-      if (csv_conv.lon_index >= 0 && csv_conv.lon_index < (int)vals.size() &&
-          csv_conv.lat_index >= 0 && csv_conv.lat_index < (int)vals.size() ){
-        lon = vals[csv_conv.lon_index];
-        lat = vals[csv_conv.lat_index];
-      }else{
-        vw::Vector3 llh = geo.datum().cartesian_to_geodetic(xyz);
-        lon = llh[0];
-        lat = llh[1];
-      }
+      // the longitude of the point, we'll use it to compute the mean longitude.
+      vw::Vector2 lonlat = csv_conv.csv_to_lonlat(vals, geo);
+      lon = lonlat[0]; // Needed for mean calculation below
+      lat = lonlat[1];
+
+      // TODO: We really need a lonlat bbox function that handles wraparound!!!!!!
       // Skip points outside the given box
-      if (!lonlat_box.empty() && !lonlat_box.contains(vw::Vector2(lon, lat)))
+      if (!lonlat_box.empty() && !lonlat_box.contains(lonlat)
+                              && !lonlat_box.contains(lonlat+vw::Vector2(360,0))
+                              && !lonlat_box.contains(lonlat-vw::Vector2(360,0))) {
         continue;
+      }
 
     }else if (!is_lola_rdr_format){
 
       // lat,lon,height format
-      double lat, height;
+      double height;
 
       strncpy(temp, line.c_str(), bufSize);
       const char* token = strtok(temp, sep); null_check(token, line);
@@ -1188,12 +1131,8 @@ void save_trans_point_cloud(asp::BaseOptions const& opt,
     outfile.precision(16);
 
     // Write the header line
-    if (csv_conv.csv_format_str != ""){
-      outfile << "# ";
-      for (std::map<int, std::string>::const_iterator it = csv_conv.col2name.begin();
-           it != csv_conv.col2name.end(); it++){
-        outfile << it->second << ",";
-      }
+    if (csv_conv.is_configured()){
+      outfile << "# " << csv_conv.write_header_string(",");
       outfile << std::endl;
     }else{
       if (is_lola_rdr_format)
@@ -1226,7 +1165,7 @@ void save_trans_point_cloud(asp::BaseOptions const& opt,
       vw::Vector3 P;
       for (int row = 0; row < DIM; row++) P[row] = V[row];
 
-      if (csv_conv.csv_format_str != ""){
+      if (csv_conv.is_configured()){
 
         vw::Vector3 csv = csv_conv.cartesian_to_csv(P, geo, mean_longitude);
         outfile << csv[0] << ',' << csv[1] << ',' << csv[2] << std::endl;

@@ -37,8 +37,8 @@ m4_pattern_allow([^PKG_ARBITRARY_QT_NEEDED_HEADERS$])
 
 AC_PREREQ([2.59])
 dnl TODO BEFORE RELEASE: update package version
-AC_INIT([NASA Ames Stereo Pipeline], [2.5.1], [asp@nx.arc.nasa.gov], [StereoPipeline])
-#AC_INIT([NASA Ames Stereo Pipeline], [2.5.0_post], [asp@nx.arc.nasa.gov], [StereoPipeline])
+AC_INIT([NASA Ames Stereo Pipeline], [2.5.2], [asp@nx.arc.nasa.gov], [StereoPipeline])
+#AC_INIT([NASA Ames Stereo Pipeline], [2.5.2_post], [asp@nx.arc.nasa.gov], [StereoPipeline])
 AC_CONFIG_AUX_DIR(config)
 AC_CONFIG_MACRO_DIR([m4])
 AC_CANONICAL_HOST
@@ -218,9 +218,11 @@ AX_PKG(TIFF, [Z JP2], [-ltiff], [tiff.h])
 AX_PKG(PROJ4, [M], [-lproj], [proj_api.h])
 AX_PKG(GEOTIFF, [PROJ4 TIFF], [-lgeotiff], [geotiff.h])
 AX_PKG(GDAL, [GEOTIFF PNG], [-lgdal], [gdal.h])
-
 AX_PKG(ILMBASE, [M Z PTHREADS], [-lImath -lHalf -lIex -lIlmThread], [Iex.h], [OpenEXR])
 AX_PKG(OPENEXR, [ILMBASE], [-lIlmImf], [ImfOutputFile.h], [OpenEXR])
+
+# We don't build all the components in BinaryBuilder, so only include certain headers.
+AX_PKG(OPENCV,     [], [-lopencv_core -lopencv_imgproc -lopencv_features2d -lopencv_calib3d -lopencv_flann -lopencv_nonfree],  [ opencv2/core/core_c.h opencv2/core/core.hpp  opencv2/imgproc/imgproc_c.h opencv2/imgproc/imgproc.hpp opencv2/features2d/features2d.hpp opencv2/objdetect/objdetect.hpp opencv2/calib3d/calib3d.hpp opencv2/nonfree/nonfree.hpp opencv2/nonfree/features2d.hpp ])
 
 AX_PKG(LASZIP,  [], [-llaszip], [laszip/laszip.hpp])
 AX_PKG(LIBLAS,  [BOOST_THREAD BOOST BOOST_PROGRAM_OPTIONS LASZIP GDAL], [-llas], [liblas/liblas.hpp])
@@ -363,10 +365,9 @@ if test x"$HAVE_PKG_ISIS" = "xyes"; then
   AX_PKG_ISIS_CHECK_VERSION()
 fi
 
-AX_PKG(YAML, [], [-lyaml-cpp], [])
 AX_PKG(EIGEN,  [BOOST_THREAD BOOST BOOST_PROGRAM_OPTIONS], [], [])
 AX_PKG(LIBNABO, [], [-lnabo], [])
-AX_PKG(LIBPOINTMATCHER, [LIBNABO EIGEN YAML BOOST_THREAD BOOST_FILESYSTEM BOOST_SYSTEM BOOST_PROGRAM_OPTIONS BOOST_DATETIME], [-lpointmatcher], [])
+AX_PKG(LIBPOINTMATCHER, [LIBNABO EIGEN BOOST_THREAD BOOST_FILESYSTEM BOOST_SYSTEM BOOST_PROGRAM_OPTIONS BOOST_DATETIME], [-lpointmatcher], [])
 
 dnl check for recent rabbitmq; this can go away soon, it's just to prevent a
 dnl flag-day upgrade
@@ -398,6 +399,7 @@ AM_CONDITIONAL(HAVE_PKG_OPENSCENEGRAPH, [test "$HAVE_PKG_OPENSCENEGRAPH" = "yes"
 AM_CONDITIONAL(HAVE_PKG_RABBITMQ_C,     [test "$HAVE_PKG_RABBITMQ_C" = "yes"])
 AM_CONDITIONAL(HAVE_PKG_PROTOBUF,       [test "$HAVE_PKG_PROTOBUF" = "yes"])
 AM_CONDITIONAL(HAVE_PKG_FLANN,          [test "$HAVE_PKG_FLANN" = "yes"])
+AM_CONDITIONAL(HAVE_PKG_OPENCV,         [test "$HAVE_PKG_OPENCV"     = "yes"])
 
 ##################################################
 # module definitions
@@ -417,7 +419,7 @@ AX_MODULE(PYTHON,   [src/asp/Python],   [],                  yes, [],     [],   
 
 # Tools - The yes/no means to enable by default
 AX_APP(PC_ALIGN,         [src/asp/Tools], yes, [CORE LIBPOINTMATCHER])
-AX_APP(BUNDLE_ADJUST,    [src/asp/Tools], yes, [VW_BUNDLEADJUSTMENT SESSIONS CERES])
+AX_APP(BUNDLE_ADJUST,    [src/asp/Tools], yes, [CORE VW_BUNDLEADJUSTMENT SESSIONS CERES OPENCV])
 AX_APP(BUNDLEVIS,        [src/asp/Tools], yes, [OPENSCENEGRAPH VW_BUNDLEADJUSTMENT CORE])
 AX_APP(SFS,              [src/asp/Tools], yes, [SESSIONS CERES])
 AX_APP(DEM_MOSAIC,       [src/asp/Tools], yes, [CORE])
@@ -444,6 +446,7 @@ AX_APP(IMAGE_CALC,       [src/asp/Tools], yes, [CORE])
 AX_APP(PANSHARP,         [src/asp/Tools], yes, [CORE CAMERA])
 AX_APP(PC_MERGE,         [src/asp/Tools], yes, [CORE])
 AX_APP(DATUM_CONVERT,    [src/asp/Tools], yes, [CORE])
+AX_APP(DISP_AVG,         [src/asp/WVCorrect], yes, [CORE])
 
 # These are here (instead of inside the APP macro where they belong)
 # for backwards compatability with older versions of automake.
@@ -483,6 +486,7 @@ AM_CONDITIONAL(MAKE_APP_IMAGE_CALC, [test "$MAKE_APP_IMAGE_CALC" = "yes"])
 AM_CONDITIONAL(MAKE_APP_PANSHARP,   [test "$MAKE_APP_PANSHARP"   = "yes"])
 AM_CONDITIONAL(MAKE_APP_PC_MERGE,   [test "$MAKE_APP_PC_MERGE"   = "yes"])
 AM_CONDITIONAL(MAKE_APP_DATUM_CONVERT, [test "$MAKE_APP_DATUM_CONVERT" = "yes"])
+AM_CONDITIONAL(MAKE_APP_DISP_AVG, [test "$MAKE_APP_DISP_AVG" = "yes"])
 
 ##################################################
 # final processing
@@ -529,6 +533,7 @@ AC_CONFIG_FILES([                        \
   src/asp/GUI/Makefile                   \
   src/asp/Python/Makefile                \
   src/asp/Tools/Makefile
+  src/asp/WVCorrect/Makefile
 ])
 
 AC_OUTPUT

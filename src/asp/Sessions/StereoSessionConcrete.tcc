@@ -121,14 +121,46 @@ void StereoSessionConcrete<DISKTRANSFORM_TYPE,STEREOMODEL_TYPE>::
       return;
   };
 
-  // Load the pair of camera models. We assume the user did not use
-  // adjusted models on map-projection.
+  vw_out() << "Loading the camera models that were used in map-projection\n";
+
+  // Back up the bundle-adjust prefix that should be used only with the
+  // original camera model, not with the model used in mapprojection
+  // (e.g., the original camera model could have been DG, but in
+  // map-projection we could have used RPC).
   std::string ba_pref_bk = stereo_settings().bundle_adjust_prefix;
+
+  // Load the models used in map-projection. If map-projection was
+  // done with adjusted models, apply those adjustments.
+  std::string l_adj_prefix, r_adj_prefix;
+  {
+    std::string adj_key = "BUNDLE_ADJUST_PREFIX";
+    boost::shared_ptr<vw::DiskImageResource> l_rsrc
+      (new vw::DiskImageResourceGDAL(m_left_image_file));
+    vw::cartography::read_header_string(*l_rsrc.get(), adj_key, l_adj_prefix);
+    boost::shared_ptr<vw::DiskImageResource> r_rsrc
+      (new vw::DiskImageResourceGDAL(m_right_image_file));
+    vw::cartography::read_header_string(*r_rsrc.get(), adj_key, r_adj_prefix);
+  }
+
+  // TODO: Verify that the DEM encoded in the map-projected image above
+  // is the same as m_input_dem used below.
+
   stereo_settings().bundle_adjust_prefix = "";
-  m_left_map_proj_model  = load_camera_model(model_type_to_load,
-                                             m_left_image_file,  m_left_camera_file );
-  m_right_map_proj_model = load_camera_model(model_type_to_load,
-                                             m_right_image_file, m_right_camera_file);
+  if ( (l_adj_prefix != "" && l_adj_prefix != "NONE") )
+    stereo_settings().bundle_adjust_prefix = l_adj_prefix;
+  m_left_map_proj_model
+    = load_camera_model(model_type_to_load,
+                        m_left_image_file,  m_left_camera_file );
+
+  stereo_settings().bundle_adjust_prefix = "";
+  if (r_adj_prefix != "" && r_adj_prefix != "NONE")
+    stereo_settings().bundle_adjust_prefix = r_adj_prefix;
+  m_right_map_proj_model
+    = load_camera_model(model_type_to_load,
+                        m_right_image_file, m_right_camera_file);
+
+  // Go back to the original bundle-adjust prefix now that we have
+  // loaded the models used in map-projection.
   stereo_settings().bundle_adjust_prefix = ba_pref_bk;
 
   VW_ASSERT( m_left_map_proj_model.get() && m_right_map_proj_model.get(),
@@ -140,6 +172,9 @@ void StereoSessionConcrete<DISKTRANSFORM_TYPE,STEREOMODEL_TYPE>::
   if (!boost::filesystem::exists(m_input_dem))
     vw_throw( ArgumentErr() << "StereoSessionConcrete: DEM \"" << m_input_dem
               << "\" does not exist." );
+
+  vw_out() << "Done loading the camera models used in map-projection\n";
+
 }
 
 // Code for reading different camera models
@@ -172,6 +207,9 @@ template <STEREOSESSION_DISKTRANSFORM_TYPE  DISKTRANSFORM_TYPE,
 boost::shared_ptr<vw::camera::CameraModel>
 StereoSessionConcrete<DISKTRANSFORM_TYPE,STEREOMODEL_TYPE>::camera_model(std::string const& image_file,
                                                                          std::string const& camera_file) {
+  vw_out() << "Loading camera model: " << image_file << ' ' << camera_file
+           << "\n";
+
   if (camera_file == "") // No camera file provided, use the image file.
     return load_camera_model(STEREOMODEL_TYPE, image_file, image_file);
   else // Camera file provided

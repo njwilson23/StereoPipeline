@@ -82,6 +82,36 @@ bool asp::has_tif_or_ntf_extension(std::string const& input){
   return false;
 }
 
+bool asp::all_files_have_extension(std::vector<std::string> const& files, std::string const& ext){
+  for (size_t i = 0; i < files.size(); i++){
+    if ( ! boost::iends_with(boost::to_lower_copy(files[i]), ext) )
+      return false;
+  }
+  return true;
+}
+
+
+
+std::vector<std::string>
+asp::get_files_with_ext( std::vector<std::string>& files, std::string const& ext, bool prune_input_list ) {
+  std::vector<std::string> match_files;
+  std::vector<std::string>::iterator it = files.begin();
+  while ( it != files.end() ) {
+    if ( boost::iends_with(boost::to_lower_copy(*it), ext) ){ // Match
+      match_files.push_back( *it );
+      if (prune_input_list) // Clear match from the input list
+        it = files.erase( it );
+      else
+        ++it;
+    } else // No Match
+      ++it;
+  } // End loop through input list
+
+  return match_files;
+}
+
+
+
 /// Parse the list of files specified as positional arguments on the command lin
 bool asp::parse_multiview_cmd_files(std::vector<std::string> const &filesIn,
                                     std::vector<std::string>       &image_paths,
@@ -299,8 +329,6 @@ asp::BaseOptionsDescription::BaseOptionsDescription( asp::BaseOptions& opt ) {
     ("no-bigtiff", "Tell GDAL to not create bigtiffs.")
     ("tif-compress", po::value(&opt.tif_compress)->default_value("LZW"),
      "TIFF Compression method. [None, LZW, Deflate, Packbits]")
-    ("cache-dir", po::value(&opt.cache_dir)->default_value("/tmp"),
-     "Folder for temporary files. Change if directory is inaccessible to user such as on Pleiades.")
     ("version,v", "Display the version of software.")
     ("help,h", "Display this help message.");
 }
@@ -460,6 +488,31 @@ void asp::set_srs_string(std::string srs_string, bool have_user_datum,
 #endif
 
 }
+
+
+void asp::BitChecker::check_argument( vw::uint8 arg ) {
+  // Turn on the arg'th bit in m_checksum
+  m_checksum.set(arg);
+}
+
+asp::BitChecker::BitChecker( vw::uint8 num_arguments )  : m_checksum(0) {
+  VW_ASSERT( num_arguments != 0,
+             ArgumentErr() << "There must be at least one thing you read.\n");
+  VW_ASSERT( num_arguments <= 32,
+             ArgumentErr() << "You can only have up to 32 checks.\n" );
+
+  // Turn on the first num_arguments bits in m_good
+  m_good.reset();
+  m_checksum.reset();
+  for ( uint8 i=0; i<num_arguments; ++i )
+    m_good.set(i);
+}
+
+bool asp::BitChecker::is_good() const {
+  // Make sure all expected bits in m_checksum have been turned on.
+  return (m_good == m_checksum);
+}
+
 
 namespace boost {
 namespace program_options {

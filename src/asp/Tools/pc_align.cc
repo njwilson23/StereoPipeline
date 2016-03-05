@@ -360,7 +360,7 @@ void read_georef(Options& opt, asp::CsvConv& csv_conv, GeoReference& geo){
     vw_out() << "Will use datum (for CSV files): " << geo.datum() << std::endl;
 
   // A lot of care is needed below.
-  if (!is_good  && (opt.csv_format_str == "" || csv_conv.format != asp::CsvConv::XYZ) ){
+  if (!is_good  && (opt.csv_format_str == "" || csv_conv.get_format() != asp::CsvConv::XYZ) ){
     // There is no DEM/LAS to read the datum from, and the user either
     // did not specify the CSV format (then we set it to lat, lon,
     // height), or it is specified as containing lat, lon, rather than xyz.
@@ -417,7 +417,7 @@ void calc_stats(string label, PointMatcher<RealT>::Matrix const& dists){
   double a25 = calc_mean(errs,   len/4), a50  = calc_mean(errs, len/2);
   double a75 = calc_mean(errs, 3*len/4), a100 = calc_mean(errs, len);
   vw_out() << label << ": mean of smallest errors (meters):"
-           << " 25%: " << a25 << ", 50%: " << a50
+           << " 25%: "  << a25 << ", 50%: "  << a50
            << ", 75%: " << a75 << ", 100%: " << a100 << endl;
 }
 
@@ -426,7 +426,7 @@ void calc_stats(string label, PointMatcher<RealT>::Matrix const& dists){
 void dump_llh(string const& file, Datum const& datum,
               DP const & data, Vector3 const& shift){
 
-  vw_out() << "Writing: " << data.features.cols()
+  vw_out() << "Writing: "   << data.features.cols()
            << " points to " << file << std::endl;
 
   ofstream fs(file.c_str());
@@ -493,12 +493,8 @@ void save_errors(DP const& point_cloud,
   outfile.precision(16);
 
   // Write the header line
-  if (csv_conv.csv_format_str != ""){
-    outfile << "# ";
-    for (map<int, string>::const_iterator it = csv_conv.col2name.begin(); it != csv_conv.col2name.end(); it++){
-      outfile << it->second << ",";
-    }
-    outfile << "error (meters)" << endl;
+  if (csv_conv.is_configured()){
+    outfile << "# " << csv_conv.write_header_string(",") << "error (meters)" << endl;
   }else{
     if (is_lola_rdr_format)
       outfile << "# longitude,latitude,radius (km),error (meters)" << endl;
@@ -516,7 +512,7 @@ void save_errors(DP const& point_cloud,
   for(int col = 0; col < numPts; col++){
     Vector3 P = get_cloud_gcc_coord(point_cloud, shift, col);
 
-    if (csv_conv.csv_format_str != ""){
+    if (csv_conv.is_configured()){
       Vector3 csv = csv_conv.cartesian_to_csv(P, geo, mean_longitude);
       outfile << csv[0] << ',' << csv[1] << ',' << csv[2]
               << "," << errors(0, col) << endl;
@@ -698,22 +694,47 @@ void filter_source_cloud(DP          const& ref_point_cloud,
     vw_out() << "Filtering gross outliers" << endl;
 
   PointMatcher<RealT>::Matrix error_matrix;
-  if (opt.use_dem_distances()) {
-    // Compute the registration error using the best available means
-    compute_registration_error(ref_point_cloud, source_point_cloud, pm_icp_object, shift,
-                               dem_georef, dem_ref, opt, error_matrix);
+  try {
+    if (opt.use_dem_distances()) {
+      // Compute the registration error using the best available means
+      compute_registration_error(ref_point_cloud, source_point_cloud, pm_icp_object, shift,
+                                 dem_georef, dem_ref, opt, error_matrix);
 
-    filterPointsByError(source_point_cloud, error_matrix, opt.max_disp);
-  } else { // LPM only method
-      // Points in source_point_cloud further than opt.max_disp from ref_point_cloud are deleted!
-      pm_icp_object.filterGrossOutliersAndCalcErrors(ref_point_cloud, opt.max_disp*opt.max_disp,
-                                                     source_point_cloud, error_matrix);
+      filterPointsByError(source_point_cloud, error_matrix, opt.max_disp);
+    } else { // LPM only method
+        // Points in source_point_cloud further than opt.max_disp from ref_point_cloud are deleted!
+        pm_icp_object.filterGrossOutliersAndCalcErrors(ref_point_cloud, opt.max_disp*opt.max_disp,
+                                                       source_point_cloud, error_matrix);
+    }
+  }catch(const PointMatcher<RealT>::ConvergenceError & e){
+    vw_throw( ArgumentErr() << "Error: No points left in source cloud after filtering.\n");
   }
+
 
   sw.stop();
   if (opt.verbose)
     vw_out() << "Filtering gross outliers took " << sw.elapsed_seconds() << " [s]" << endl;
 }
+
+
+Eigen::Matrix3d vw_matrix3_to_eigen(vw::Matrix3x3 const& vw_matrix) {
+  Eigen::Matrix3d out;
+  out(0,0) = vw_matrix(0,0);
+  out(0,1) = vw_matrix(0,1);
+  out(0,2) = vw_matrix(0,2);
+  out(1,0) = vw_matrix(1,0);
+  out(1,1) = vw_matrix(1,1);
+  out(1,2) = vw_matrix(1,2);
+  out(2,0) = vw_matrix(2,0);
+  out(2,1) = vw_matrix(2,1);
+  out(2,2) = vw_matrix(2,2);
+  return out;
+}
+
+Eigen::Vector3d vw_vector3_to_eigen(vw::Vector3 const& vw_vector) {
+  return Eigen::Vector3d(vw_vector[0], vw_vector[1], vw_vector[2]);
+}
+
 
 // Compute a manual transform based on tie points (interest point matches).
 void manual_transform(Options & opt){
@@ -746,7 +767,8 @@ void manual_transform(Options & opt){
 
   // Go from pixels to 3D points
   int num_matches = ref_ip.size();
-  Eigen::Matrix3Xd ref_mat(DIM, num_matches), source_mat(DIM, num_matches);
+  vw::Matrix<double> points_ref(DIM, num_matches), points_src(DIM, num_matches);
+  typedef vw::math::MatrixCol<vw::Matrix<double> > ColView;
   int count = 0;
   for (int match_id = 0; match_id < num_matches; match_id++) {
     int ref_x = ref_ip[match_id].x;
@@ -765,7 +787,7 @@ void manual_transform(Options & opt){
     // Check for no-data and NaN pixels
     if (source_h <= source_nodata || source_h != source_h) continue;
 
-    Vector2 ref_ll = ref_geo.pixel_to_lonlat(Vector2(ref_x, ref_y));
+    Vector2 ref_ll  = ref_geo.pixel_to_lonlat(Vector2(ref_x, ref_y));
     Vector3 ref_xyz = ref_geo.datum()
       .geodetic_to_cartesian(Vector3(ref_ll[0], ref_ll[1], ref_h));
 
@@ -773,15 +795,12 @@ void manual_transform(Options & opt){
     Vector3 source_xyz = source_geo.datum()
       .geodetic_to_cartesian(Vector3(source_ll[0], source_ll[1], source_h));
 
-    // Go from VW vectors to Eigen vectors
-    Eigen::Vector3d ref_vec, source_vec;
-    for (int col = 0; col < DIM; col++) {
-      ref_vec[col]    = ref_xyz[col];
-      source_vec[col] = source_xyz[col];
-    }
-
-    ref_mat.col(count)    = ref_vec;
-    source_mat.col(count) = source_vec;
+    // Store in matrices
+    ColView col_ref(points_ref, count); 
+    ColView col_src(points_src, count);
+    col_ref = ref_xyz;
+    col_src = source_xyz;
+    
     count++;
   }
 
@@ -789,14 +808,18 @@ void manual_transform(Options & opt){
     vw_throw( ArgumentErr() << "Not enough valid matches were found.\n");
 
   // Resize the matrix to keep only the valid points. Find the transform.
-  ref_mat.conservativeResize(Eigen::NoChange, count);
-  source_mat.conservativeResize(Eigen::NoChange, count);
-  Eigen::Affine3d trans = Find3DAffineTransform(source_mat, ref_mat);
+  points_src.set_size(DIM, count, true);
+  points_ref.set_size(DIM, count, true);
+  vw::Matrix3x3 rotation;
+  vw::Vector3   translation;
+  double        scale;
+  asp::find_3D_affine_transform(points_src, points_ref,
+                                rotation, translation, scale);
 
   // Convert to pc_align transform format.
   PointMatcher<RealT>::Matrix globalT = Eigen::MatrixXd::Identity(DIM+1, DIM+1);
-  globalT.block(0, 0, DIM, DIM) = trans.linear();
-  globalT.block(0, DIM, DIM, 1) = trans.translation();
+  globalT.block(0, 0, DIM, DIM) = vw_matrix3_to_eigen(rotation*scale);
+  globalT.block(0, DIM, DIM, 1) = vw_vector3_to_eigen(translation);
 
   vw_out() << "Computed manual transform from source to reference:\n" << globalT << std::endl;
 
@@ -956,7 +979,7 @@ int main( int argc, char *argv[] ) {
 
     // Filter the reference and initialize the reference tree
     double elapsed_time;
-    PM::ICP icp;
+    PM::ICP icp; // LibpointMatcher object
     Stopwatch sw3;
     if (opt.verbose)
       vw_out() << "Building the reference cloud tree." << endl;

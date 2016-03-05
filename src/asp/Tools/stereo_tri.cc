@@ -26,6 +26,7 @@
 #include <asp/Camera/RPCModel.h>
 #include <asp/Tools/stereo.h>
 #include <asp/Tools/jitter_adjust.h>
+#include <asp/Tools/ccd_adjust.h>
 
 // We must have the implementations of all sessions for triangulation
 #include <asp/Sessions/StereoSessionFactory.tcc>
@@ -90,7 +91,7 @@ public:
   /// Compute the 3D coordinate corresponding to a pixel location.
   /// - p is not actually used here, it should always be zero!
   inline result_type operator()( size_t i, size_t j, size_t p=0 ) const {
-
+      
     // For each input image, de-warp the pixel in to the native camera coordinates
     int num_disp = m_disparity_maps.size();
     vector<Vector2> pixVec(num_disp + 1);
@@ -507,7 +508,9 @@ void stereo_triangulation( string          const& output_prefix,
       if (opt_vec[0].session->name() == "isis" || opt_vec[0].session->name() == "isismapisis")
         num_threads = 1;
       asp::jitter_adjust(image_files, camera_files, cameras, output_prefix,
-                         match_file,  num_threads);
+                      match_file,  num_threads);
+      //asp::ccd_adjust(image_files, camera_files, cameras, output_prefix,
+      //                match_file,  num_threads);
     }
 
     if (stereo_settings().compute_piecewise_adjustments_only) {
@@ -517,12 +520,6 @@ void stereo_triangulation( string          const& output_prefix,
 
     // Reload the cameras, loading the piecewise corrections for jitter.
     if (stereo_settings().image_lines_per_piecewise_adjustment > 0) {
-
-      // Sanity check. We actually performed it already, this is just being
-      // extra cautious.
-      if (stereo_settings().bundle_adjust_prefix != "")
-        vw_throw( ArgumentErr() << "Since we perform piecewise adjustments to reduce jitter, "
-                  << "the input cameras should not have been bundle-adjusted.\n");
 
       stereo_settings().bundle_adjust_prefix = output_prefix; // trigger loading adj cams
       cameras.clear();
@@ -536,11 +533,15 @@ void stereo_triangulation( string          const& output_prefix,
       }
     }
 
+    if (is_map_projected)
+      vw_out() << "\t--> Inputs are map projected" << std::endl;
+
     // Strip the smart pointers and form the stereo model
     std::vector<const vw::camera::CameraModel *> camera_ptrs;
     int num_cams = cameras.size();
-    for (int c = 0; c < num_cams; c++)
+    for (int c = 0; c < num_cams; c++) {
       camera_ptrs.push_back(cameras[c].get());
+    }
     StereoModelT stereo_model( camera_ptrs, stereo_settings().use_least_squares );
 
     // Apply radius function and stereo model in one go
@@ -611,7 +612,7 @@ void stereo_triangulation( string          const& output_prefix,
 
 int main( int argc, char* argv[] ) {
 
-  try {
+  //try {
 
     vw_out() << "\n[ " << current_posix_time_string() << " ] : Stage 4 --> TRIANGULATION \n";
 
@@ -668,7 +669,7 @@ int main( int argc, char* argv[] ) {
 
     vw_out() << "\n[ " << current_posix_time_string() << " ] : TRIANGULATION FINISHED \n";
 
-  } ASP_STANDARD_CATCHES;
+ // } ASP_STANDARD_CATCHES;
 
   return 0;
 }

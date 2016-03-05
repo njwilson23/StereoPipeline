@@ -12,6 +12,13 @@ A sample \texttt{stereo.default.example} file is included in the
 \texttt{examples/} directory of the Stereo Pipeline software
 distribution.
 
+As mentioned in section \ref{cmdline}, all the \texttt{stereo} parameters can also be specified on the
+command line.
+
+Listed below are the parameters used by \texttt{stereo}, grouped by
+processing stage.
+
+
 % -------------------------------------------------------------------
 %                           PREPROCESSING
 % -------------------------------------------------------------------
@@ -254,6 +261,19 @@ If the default method does not perform well, try out one of the other two method
   result. This will drastically improve speed at the cost of
   additional noise.
 
+\item[rm-quantile-percentile \textnormal{\small{(\emph{double})}} (default = 0.85)] \hfill \\
+  See rm-quantile-multiple for details.
+
+\item[rm-quantile-multiple \textnormal{\small{(\emph{double})}} (default = -1)] \hfill \\
+  Used for filtering disparity values in D\_sub.  Disparities 
+  greater than MULTIPLE*PERCENTILE (of the histogram) will be discarded.  
+  If this value is set greater
+  than zero, this filtering method will be used instead of the
+  method using the values RM\_MIN\_MATCHES and RM\_THRESHOLD.
+  This method will help filter out clusters of pixels which are too large to be
+  filtered out by the neighborhood method but that have disparities significantly
+  greater than the rest of the image.
+
 \item[use-local-homography \textnormal (default = false)] \hfill \\
 
   This flag, if provided, enables using local homography during
@@ -435,7 +455,7 @@ The next several parameters are used for jitter correction for Digital
 Globe imagery. A usage tutorial is given in section \ref{sec:jitter}.
 
 \item[image-lines-per-piecewise-adjustment \textnormal{\small{(\emph{integer})}} (default = 0)]
-A positive value, e.g., 2000, will turn on using piecewise camera adjustments to help reduce jitter effects. Use one adjustment per this many image lines.
+A positive value, e.g., 1000, will turn on using piecewise camera adjustments to help reduce jitter effects. Use one adjustment per this many image lines.
 
 \item[piecewise-adjustment-percentiles \textnormal{\small{(\emph{float
         float})}} (default = 5 95)]
@@ -443,6 +463,9 @@ A narrower range will place the piecewise adjustments for jitter correction clos
 
 \item[piecewise-adjustment-interp-type \textnormal{\small{(\emph{integer})}} (default = 1)]
 How to interpolate between adjustments. [1 Linear, 2 Using Gaussian weights]
+
+\item[piecewise-adjustment-camera-weight \textnormal{\small{(\emph{float})}} (default = 1.0)]
+The weight to use for the sum of squares of adjustments component of the cost function. Increasing this value will constrain the adjustments to be smaller.
 
 \item[num-matches-for-piecewise-adjustment \textnormal{\small{(\emph{integer})}} (default = 90000)]
 How many matches among images to create based on the disparity for the purpose of solving for jitter using piecewise adjustment.

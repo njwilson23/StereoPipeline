@@ -257,22 +257,24 @@ namespace asp {
     return;
   }
 
-bool StereoSession::shared_preprocessing_hook(asp::BaseOptions              & options,
-					      std::string const             & left_input_file,
-					      std::string const             & right_input_file,
-					      std::string                   & left_output_file,
-					      std::string                   & right_output_file,
-					      std::string                   & left_cropped_file,
-					      std::string                   & right_cropped_file,
-					      float                         & left_nodata_value,
-					      float                         & right_nodata_value,
-					      bool                          & has_left_georef,
-					      bool                          & has_right_georef,
-					      vw::cartography::GeoReference & left_georef,
-					      vw::cartography::GeoReference & right_georef){
+bool StereoSession::
+shared_preprocessing_hook(asp::BaseOptions              & options,
+                          std::string const             & left_input_file,
+                          std::string const             & right_input_file,
+                          std::string                   & left_output_file,
+                          std::string                   & right_output_file,
+                          std::string                   & left_cropped_file,
+                          std::string                   & right_cropped_file,
+                          float                         & left_nodata_value,
+                          float                         & right_nodata_value,
+                          bool                          & has_left_georef,
+                          bool                          & has_right_georef,
+                          vw::cartography::GeoReference & left_georef,
+                          vw::cartography::GeoReference & right_georef){
 
-  // Retrieve nodata values
   {
+    // Retrieve nodata values and let the handles go out of scope right away.
+
     // For this to work the ISIS type must be registered with the
     // DiskImageResource class.  - This happens in "stereo.cc", so
     // these calls will create DiskImageResourceIsis objects.
@@ -405,7 +407,9 @@ vw::Vector2 camera_pixel_offset(std::string const& input_dem,
   else if (curr_image_file == right_image_file)
     return right_pixel_offset;
   else
-    vw_throw(ArgumentErr() << "Supplied image file does not match left or right image file.");
+    // If the image files were not specified, no offset and no error.
+    if ((left_image_file != "") || (right_image_file != ""))
+      vw_throw(ArgumentErr() << "Supplied image file does not match left or right image file.");
 
   return Vector2();
 }
@@ -424,30 +428,32 @@ load_adjusted_model(boost::shared_ptr<vw::camera::CameraModel> cam,
     return cam; // Just return if nothing is adjusting the camera
 
   std::vector<Vector3> position_correction;
-  std::vector<Quat> pose_correction;
+  std::vector<Quat   > pose_correction;
 
   // Ensure these vectors are populated even when there are no corrections to read,
   // as we may still have pixel offset.
   position_correction.push_back(Vector3());
   pose_correction.push_back(Quat(math::identity_matrix<3>()));
 
-  if (ba_pref != "") {
+  if (ba_pref != "") { // If a bundle adjustment file was specified
 
+    // Get full BA file path
     std::string adjust_file = asp::bundle_adjust_file_name(ba_pref, image_file, camera_file);
 
     if (!boost::filesystem::exists(adjust_file))
       vw_throw(InputErr() << "Missing adjusted camera model: " << adjust_file << ".\n");
 
     vw_out() << "Using adjusted camera model: " << adjust_file << std::endl;
+    bool piecewise_adjustments;
     Vector2 adjustment_bounds;
-    asp::read_adjustments(adjust_file, adjustment_bounds, position_correction, pose_correction);
+    asp::read_adjustments(adjust_file, piecewise_adjustments,
+                          adjustment_bounds, position_correction, pose_correction);
 
     if (position_correction.empty() || pose_correction.empty())
       vw_throw(InputErr() << "Unable to read corrections.\n");
 
     // Handle the case of piecewise adjustments for DG cameras
-    if (position_correction.size() > 1 && pose_correction.size() > 1) {
-
+    if (piecewise_adjustments) {
 
       // Create the adjusted DG model
       boost::shared_ptr<camera::CameraModel> adj_dg_cam
@@ -462,10 +468,11 @@ load_adjusted_model(boost::shared_ptr<vw::camera::CameraModel> cam,
 					     Quat(math::identity_matrix<3>()), pixel_offset));
 
       return adj_dg_cam2;
-    }
+    } // End case for piecewise DG adjustment
 
-  }
+  } // End case for parsing bundle adjustment file
 
+  // Create VW adjusted camera model object with the info we loaded
   return boost::shared_ptr<camera::CameraModel>(new vw::camera::AdjustedCameraModel
 						(cam, position_correction[0],
 						 pose_correction[0], pixel_offset));

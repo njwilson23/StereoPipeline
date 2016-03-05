@@ -114,7 +114,8 @@ The program takes all the red CCDs and projects them using the \ac{ISIS}
 {\tt noproj} command into the perspective of the RED5 CCD. From there,
 {\tt hijitreg} is performed to work out the relative offsets between
 CCDs. Finally the CCDs are mosaicked together using the average
-offset listed from {\tt hijitreg} using the {\tt handmos} command.
+offset listed from {\tt hijitreg} using the {\tt handmos} command,
+and the mosaic is normalized with {\tt cubenorm}.
 Below is an outline of the processing.
 
 \begin{verbatim}
@@ -126,6 +127,7 @@ Below is an outline of the processing.
     noproj            # Project all images into perspective of RED5
     hijitreg          # Work out alignment between CCDs
     handmos           # Mosaic to single file
+    cubenorm          # Normalize the mosaic
 \end{verbatim}
 
 To use our script, first go to the directory where you have downloaded
@@ -739,8 +741,8 @@ You can download an example stereo pair from GeoEye's website at
 \cite{geoeye:samples}. When we accessed the site, we downloaded a
 GeoEye-1 image of Hobart, Australia. As previously stated in the
 Digital Globe section, these types of images are not ideal for
-\ac{ASP}. This is both a forest and a urban area which makes
-correlation difficult. \ac{ASP} was designed more for modeling bare rock
+ASP. This is both a forest and a urban area which makes
+correlation difficult. ASP was designed more for modeling bare rock
 and ice. Any results we produce in other environments is a bonus but
 is not our objective.
 
@@ -830,3 +832,5 @@ The stereo.default example file (appendix \ref{ch:stereodefault})
 works well for this stereo pair. Just set
 \texttt{alignment-method} to \texttt{affineepipolar} or
 \texttt{homography}.
+
+

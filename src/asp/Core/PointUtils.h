@@ -43,6 +43,21 @@ namespace vw{
 
 namespace asp {
 
+
+  // TODO: Move this to VW!
+  /// Given a set of input and output points, use an SVD to find the best
+  ///  rigid rotate/scale/translate transform that aligns the points.
+  /// - The two input matrices should have 3 rows and N columns where
+  ///   N is equal to the number of points.
+  /// - The input and output matrices will be modified by this function,
+  ///   make copies if you want to uset them again.
+  void find_3D_affine_transform(vw::Matrix<double>     & in, 
+                                vw::Matrix<double>     & out,
+                                vw::Matrix<double,3,3> & rotation,
+                                vw::Vector<double,3>   & translation,
+                                double                 & scale);
+
+
   class BaseOptions;
 
   /// A Data structure which converts from CSV to Cartesian and vice-versa.
@@ -50,28 +65,30 @@ namespace asp {
 
   public: // Definitions
 
-    // Utilities for processing csv files
+    /// Any valid input file must contain one of these sets of fields
+    /// - Note that the data is not stored in this order internally.
     enum CsvFormat{
       XYZ, HEIGHT_LAT_LON, LAT_LON_RADIUS_M,
       LAT_LON_RADIUS_KM, EASTING_HEIGHT_NORTHING};
 
-  public: // Variables
-    std::map<std::string,int>  name2col;
-    std::map<int, std::string> col2name;
-    std::map<int, int>         col2sort;
-    int         lon_index, lat_index;
-    std::string csv_format_str;
-    std::string csv_proj4_str;
-    CsvFormat   format;
-    int         utm_zone;
-    bool        utm_north;
+    /// Object used to store the data parsed from a CSV line.
+    struct CsvRecord{
+      vw::Vector3 point_data;
+      std::string file;
+    };
 
 
   public: // Functions
 
     /// Default Constructor, the object is not ready to use.
-    CsvConv() : lon_index(-1), lat_index(-1), format(XYZ), utm_zone(-1),
-                utm_north(false){}
+    CsvConv() : format(XYZ), utm_zone(-1), utm_north(false), num_targets(0){}
+
+    bool      is_configured() const {return csv_format_str != "";}
+    CsvFormat get_format   () const {return format;}
+
+    /// Writes out a header string containing each of the extracted column names
+    /// in the order they were specified.
+    std::string write_header_string(std::string const delimiter = ", ") const;
 
     /// Initialize using a pair of CSV format strings
     void parse_csv_format(std::string const& csv_format_str,
@@ -83,22 +100,74 @@ namespace asp {
     /// later from easting and northing to lon and lat.
     bool parse_georef(vw::cartography::GeoReference & georef) const;
 
-    /// Parse a CSV file line in given format
-    vw::Vector3 parse_csv_line(bool & is_first_line, bool & success,
-                               std::string const& line) const;
+    /// Extract values we care about from a csv string and pack them in a vector.
+    /// - This extracts the values in the same order they appear in the file.
+    /// - Use one of the conversion functions to get coordinates from this vector.
+    CsvRecord parse_csv_line(bool & is_first_line, bool & success,
+                              std::string const& line) const;
 
-    /// Convert values read from a csv file (in the same order as in the file)
+    /// Reads an entire CSV file and stores a record for each line.
+    /// - Intended for use with smaller files.
+    size_t parse_entire_file(std::string const    & file_path,
+                             std::list<CsvRecord> & output_list) const;
+
+    /// Convert values read from a csv file using parse_csv_line (in the same order they appear in the file)
     /// to a Cartesian point. If return_point_height is true, and the csv point is not
     /// in xyz format, return instead the projected point and height above datum.
-    vw::Vector3 csv_to_cartesian_or_point_height(vw::Vector3 const& csv,
+    vw::Vector3 csv_to_cartesian_or_point_height(CsvRecord const& csv,
                                                  vw::cartography::GeoReference const& geo,
                                                  bool return_point_height) const;
 
-    /// Convert an xyz point to the fields we can write in a CSV file, in
-    /// the same order as in the input CSV file.
+    /// Convert values read from a csv file using parse_csv_line to a Cartesian point.
+    vw::Vector3 csv_to_cartesian(CsvRecord const& csv,
+                                 vw::cartography::GeoReference const& geo) const;
+
+    /// Convert values read from a csv file using parse_csv_line to a lon/lat/height point.
+    vw::Vector3 csv_to_geodetic(CsvRecord const& csv,
+                                vw::cartography::GeoReference const& geo) const;
+
+    /// Convert values read from a csv file using parse_csv_line to a lon/lat point.
+    vw::Vector2 csv_to_lonlat(CsvRecord const& csv,
+                              vw::cartography::GeoReference const& geo) const;
+
+    /// Extracts the file name read from the csv line, or "" if it was not present.
+    std::string file_from_csv(CsvRecord const& csv) const {return csv.file;}
+
+    /// Re-order an xyz point so the values appear in the format and order they did in the csv file.
+    /// - Naturally this function does nothing about all the fields we ignored when we read the file.
     vw::Vector3 cartesian_to_csv(vw::Vector3 const& xyz,
                                  vw::cartography::GeoReference const& geo,
                                  double mean_longitude) const;
+
+
+  private: // Variables
+    std::map<std::string,int>  name2col; ///< Target names -> Column index in input csv
+    std::map<int, std::string> col2name; ///< Target column in input csv -> Name
+    std::map<int, int>         col2sort; ///< Which input columns went in which vector indices (numbers only)
+
+    std::string csv_format_str;
+    std::string csv_proj4_str;
+    CsvFormat   format;
+    int         utm_zone;
+    bool        utm_north;
+    int         num_targets; ///< The number of elements to extract from each CSV line
+
+    friend class CsvReader;
+
+  private: // Functions
+
+      /// This function hard-codes the location in the parsed vector where each
+      ///  column type will go.
+      static int get_sorted_index_for_name(std::string const& name);
+
+      /// Converts the point data vector from the order the fields appeared in the file
+      ///  to the convenient sorted order according to the "format" member variable.
+      vw::Vector3 sort_parsed_vector3(CsvRecord const& v) const;
+
+      /// Performs the revers of sort_parsed_vector3, putting the values in the order
+      ///  that they originally appeared in the file (ignores the file field).
+      vw::Vector3 unsort_vector3(vw::Vector3 const& v) const;
+
 
   }; // End class CsvConv
 
@@ -139,12 +208,12 @@ namespace asp {
   /// Parse a UTM string such as "58N"
   void parse_utm_str(std::string const& utm, int & zone, bool & north);
 
-  ///
+  /// ?
   inline std::string csv_separator(){ return ", \t"; }
 
   /// Need this for pc_align and point2dem
   inline std::string csv_opt_caption(){
-    return "Specify the format of input CSV files as a list of entries column_index:column_type (indices start from 1). Examples: '1:x 2:y 3:z', '5:lon 6:lat 7:radius_m', '3:lat 2:lon 1:height_above_datum', '1:easting 2:northing 3:height_above_datum' (need to set --csv-proj4). Can also use radius_km for column_type.";
+    return "Specify the format of input CSV files as a list of entries column_index:column_type (indices start from 1). Examples: '1:x 2:y 3:z', '2:file 5:lon 6:lat 7:radius_m', '3:lat 2:lon 1:height_above_datum 5:file', '1:easting 2:northing 3:height_above_datum' (need to set --csv-proj4). Can also use radius_km for column_type.";
   }
 
 
@@ -213,6 +282,7 @@ namespace asp {
     return vw::UnaryPerPixelView<ImageT,PointOffsetFunc>( image.impl(), PointOffsetFunc(offset) );
   }
 
+  // TODO: Move center lon functions and use consistently.
 
   // Center Longitudes
   class CenterLongitudeFunc : public vw::UnaryReturnSameType {
@@ -260,7 +330,6 @@ namespace asp {
   /// by having the z component of the point be NaN.
   vw::BBox3 pointcloud_bbox(vw::ImageViewRef<vw::Vector3> const& point_image,
                             bool is_geodetic);
-
 
 //===================================================================================
 // Template function definitions
@@ -321,6 +390,9 @@ vw::ImageViewRef<PixelT> form_point_cloud_composite(std::vector<std::string> con
 
   return composite_image;
 }
+
+// Find the average longitude for a given point image with lon, lat, height values
+  double find_avg_lon(vw::ImageViewRef<vw::Vector3> const& point_image);
 
 } // End namespace asp
 

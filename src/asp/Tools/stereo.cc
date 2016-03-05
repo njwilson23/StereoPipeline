@@ -185,9 +185,9 @@ namespace asp {
         new_alignment = "none";
 
       vw_out(WarningMessage)
-        << "For multi-view stereo, only alignment method of none or homography "
-        << "is supported. Changing alignment method from "
-        << stereo_settings().alignment_method << " to " << new_alignment << ".\n";
+        << "For multi-view stereo, only alignment method of 'none' or 'homography' "
+        << "is supported. Changing alignment method from '"
+        << stereo_settings().alignment_method << "' to '" << new_alignment << "'.\n";
       stereo_settings().alignment_method = new_alignment;
 
       // Set this for future runs as well
@@ -507,17 +507,6 @@ namespace asp {
 
     const bool dem_provided = !opt.input_dem.empty();
 
-    // Sanity check for max_valid_triangulation_error
-    if (stereo_settings().max_valid_triangulation_error <= 0){
-      vw_throw( ArgumentErr() << "The maximum valid triangulation error must be positive.\n" );
-    }
-    if (stereo_settings().max_valid_triangulation_error > 0){
-      vw_throw( ArgumentErr() << "The --max-valid-triangulation-error was moved "
-                << "to point2dem. Alternatively, the point2dem --remove-outliers "
-                << "option can be used for automatic detection of maximum "
-                << "triangulation error.\n" );
-    }
-
     // Seed mode valid values
     if (stereo_settings().seed_mode > 3){
       vw_throw(ArgumentErr() << "Invalid value for seed-mode: " << stereo_settings().seed_mode << ".\n");
@@ -573,6 +562,10 @@ namespace asp {
     if (has_georef1 && has_georef2 && !dem_provided &&
         (opt.cam_file1 != opt.in_file1) && (opt.cam_file2 != opt.in_file2) &&
         !opt.cam_file1.empty() && !opt.cam_file2.empty() ) {
+        
+    std::cout << "Georef 1: " << georef1 << std::endl;
+    std::cout << "Georef 2: " << georef1 << std::endl;
+        
       vw_out(WarningMessage) << "It appears that the input images are "
                              << "map-projected. In that case a DEM needs to be "
                              << "provided for stereo to give correct results.\n";
@@ -656,10 +649,10 @@ namespace asp {
           << "\tto triangulate or perform epipolar rectification.\n";
 
       // Developer friendly help
-      VW_OUT(DebugMessage,"asp") << "Camera 1 location: "     << cam1_ctr << "\n"
-                                 << "   in Lon Lat Rad: "     << cartography::xyz_to_lon_lat_radius(cam1_ctr) << "\n";
-      VW_OUT(DebugMessage,"asp") << "Camera 2 location: "     << cam2_ctr << "\n"
-                                 << "   in Lon Lat Rad: "     << cartography::xyz_to_lon_lat_radius(cam2_ctr) << "\n";
+      VW_OUT(DebugMessage,"asp") << "Camera 1 location: " << cam1_ctr << "\n"
+             << "   in estimated Lon Lat Rad: " << cartography::xyz_to_lon_lat_radius_estimate(cam1_ctr) << "\n";
+      VW_OUT(DebugMessage,"asp") << "Camera 2 location: " << cam2_ctr << "\n"
+             << "   in estimated Lon Lat Rad: " << cartography::xyz_to_lon_lat_radius_estimate(cam2_ctr) << "\n";
       VW_OUT(DebugMessage,"asp") << "Camera 1 Pointing Dir: " << cam1_vec << "\n"
                                  << "      dot against pos: " << dot_prod(cam1_vec, cam1_ctr) << "\n";
       VW_OUT(DebugMessage,"asp") << "Camera 2 Pointing Dir: " << cam2_vec << "\n"
@@ -698,12 +691,6 @@ namespace asp {
           vw_throw(ArgumentErr() << "Since we perform piecewise adjustments we "
                    << "need the full disparities, so --left-image-crop-win and  "
                    << "--right-image-crop-win cannot be used.\n");
-
-        if (stereo_settings().bundle_adjust_prefix != "" ||
-            dynamic_cast<vw::camera::AdjustedCameraModel*>(camera_model1.get()) != NULL ||
-            dynamic_cast<vw::camera::AdjustedCameraModel*>(camera_model2.get()) != NULL )
-          vw_throw(ArgumentErr() << "Since we perform piecewise adjustments "
-                   << "to reduce jitter, the input cameras should not have been bundle-adjusted.\n");
 
         if (stereo_settings().piecewise_adjustment_interp_type != 1 &&
             stereo_settings().piecewise_adjustment_interp_type != 2)

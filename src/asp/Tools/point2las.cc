@@ -40,9 +40,9 @@ namespace po = boost::program_options;
 // Allows FileIO to correctly read/write these pixel types
 namespace vw {
   typedef Vector<float64,6> Vector6;
-  template<> struct PixelFormatID<Vector3>   { static const PixelFormatEnum value = VW_PIXEL_GENERIC_3_CHANNEL; };
-  template<> struct PixelFormatID<Vector4>   { static const PixelFormatEnum value = VW_PIXEL_GENERIC_4_CHANNEL; };
-  template<> struct PixelFormatID<Vector6>   { static const PixelFormatEnum value = VW_PIXEL_GENERIC_6_CHANNEL; };
+  template<> struct PixelFormatID<Vector3> { static const PixelFormatEnum value = VW_PIXEL_GENERIC_3_CHANNEL; };
+  template<> struct PixelFormatID<Vector4> { static const PixelFormatEnum value = VW_PIXEL_GENERIC_4_CHANNEL; };
+  template<> struct PixelFormatID<Vector6> { static const PixelFormatEnum value = VW_PIXEL_GENERIC_6_CHANNEL; };
 }
 
 struct Options : asp::BaseOptions {
@@ -60,12 +60,13 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
 
   po::options_description general_options("General Options");
   general_options.add_options()
-    ("compressed,c", po::bool_switch(&opt.compressed)->default_value(false)->implicit_value(true),
-     "Compress using laszip.")
+    ("compressed,c",    po::bool_switch(&opt.compressed)->default_value(false)->implicit_value(true),
+           "Compress using laszip.")
     ("output-prefix,o", po::value(&opt.out_prefix), "Specify the output prefix.")
-    ("datum", po::value(&opt.datum),"Create a geo-referenced LAS file in respect to this datum. Options: WGS_1984, D_MOON (1,737,400 meters), D_MARS (3,396,190 meters), MOLA (3,396,000 meters), NAD83, WGS72, and NAD27. Also accepted: Earth (=WGS_1984), Mars (=D_MARS), Moon (=D_MOON).")
+    ("datum",           po::value(&opt.datum),
+          "Create a geo-referenced LAS file in respect to this datum. Options: WGS_1984, D_MOON (1,737,400 meters), D_MARS (3,396,190 meters), MOLA (3,396,000 meters), NAD83, WGS72, and NAD27. Also accepted: Earth (=WGS_1984), Mars (=D_MARS), Moon (=D_MOON).")
     ("reference-spheroid,r", po::value(&opt.reference_spheroid),
-     "This is identical to the datum option.")
+          "This is identical to the datum option.")
 
     ("t_srs", po::value(&opt.target_srs_string)->default_value(""),
      "Specify a custom projection (PROJ.4 string).");
@@ -114,8 +115,7 @@ void handle_arguments( int argc, char *argv[], Options& opt ) {
 int main( int argc, char *argv[] ) {
 
   // To do: need to understand what is the optimal strategy for
-  // traversing the input point cloud file to minimize the reading
-  // time.
+  // traversing the input point cloud file to minimize the reading time.
 
   Options opt;
   try {
@@ -125,8 +125,7 @@ int main( int argc, char *argv[] ) {
     // by the user.
     liblas::Header header;
     cartography::Datum datum;
-    bool has_user_datum
-      = asp::read_user_datum(0, 0, opt.datum, datum);
+    bool has_user_datum = asp::read_user_datum(0, 0, opt.datum, datum);
 
     cartography::GeoReference georef;
     bool has_georef = vw::cartography::read_georeference(georef, opt.pointcloud_file);
@@ -151,10 +150,13 @@ int main( int argc, char *argv[] ) {
       datum = georef.datum();
     }
 
-    // if we have a datum, save the las file in respect to this datum
+    // Save the las file with given georeference, if present
     ImageViewRef<Vector3> point_image = asp::read_asp_point_cloud<3>(opt.pointcloud_file);
-    if (is_geodetic)
+    if (is_geodetic) {
       point_image = cartesian_to_geodetic(point_image, datum);
+      double avg_lon = asp::find_avg_lon(point_image); // see if to use [-180, 180] or [0, 360]
+      point_image = geodetic_to_point(asp::recenter_longitude(point_image, avg_lon), georef);
+    }
 
     BBox3 cloud_bbox = asp::pointcloud_bbox(point_image, is_geodetic);
 
@@ -162,20 +164,23 @@ int main( int argc, char *argv[] ) {
     // given point, we store round((point-offset)/scale), as well as
     // the offset and scale values. Here we decide the values for
     // offset and scale to lose minimum amount of precision. We make
-    // the scale almost as large as it can be without causing integer
-    // overflow.
+    // the scale almost as large as it can be without causing integer overflow.
     Vector3 offset = (cloud_bbox.min() + cloud_bbox.max())/2.0;
-    double maxInt = std::numeric_limits<int32>::max();
-    maxInt *= 0.95; // Just in case stay a bit away
-    Vector3 scale = cloud_bbox.size()/(2.0*maxInt);
+    double  maxInt = std::numeric_limits<int32>::max();
+            maxInt *= 0.95; // Just in case stay a bit away
+    Vector3 scale  = cloud_bbox.size()/(2.0*maxInt);
     for (size_t i = 0; i < scale.size(); i++){
       if (scale[i] <= 0.0) scale[i] = 1.0e-16; // avoid degeneracy
     }
 
     // The line below causes trouble with compression in libLAS-1.7.0.
     //header.SetDataFormatId(liblas::ePointFormat1);
-    header.SetScale(scale[0], scale[1], scale[2]);
+    header.SetScale (scale [0], scale [1], scale [2]);
     header.SetOffset(offset[0], offset[1], offset[2]);
+
+    // Populate the min and max fields of the LAS header
+    header.SetMax(cloud_bbox.max().x(),cloud_bbox.max().y(),cloud_bbox.max().z());
+    header.SetMin(cloud_bbox.min().x(),cloud_bbox.min().y(),cloud_bbox.min().z());
 
     std::string lasFile;
     header.SetCompressed(opt.compressed);

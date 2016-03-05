@@ -289,10 +289,12 @@ currently model refraction due to light bending in Earth's
 atmosphere. It is our understanding that this could represent
 misplacement of points up to a meter for some imagery. However this is
 still smaller error than the error from measurement of the spacecraft's
-position and orientation. We do not provide facilities for correcting
-spacecraft altitude either. The \texttt{pc\_align} tool discussed in
-section \ref{pc-align-example} can be used to align the terrain obtained
-from Stereo Pipeline to an accurate set of ground measurements.
+position and orientation. The latter can be corrected using bundle
+adjustment, ideally used with ground control points (section
+\ref{bundleadjust}). Alternatively, the \texttt{pc\_align} tool
+discussed in section \ref{pc-align-example} can be used to align the
+terrain obtained from ASP to an accurate set of ground
+measurements.
 
 In the next two sections we will show how to process unmodified and
 map-projected variants of World View imagery. This steps will be the
@@ -394,7 +396,7 @@ follows:
 The corrected images can be used just as the originals, and the camera
 models do not change. When working with such imagery, we recommend that
 CCD artifact correction happen first, on original un-projected
-imagery. Afterwards images can be mosaicked with \texttt{dg\_mosaic},
+imagery. Afterward images can be mosaicked with \texttt{dg\_mosaic},
 map-projected, and the resulting data used to run stereo and create
 terrain models.
 
@@ -419,8 +421,9 @@ jitter, and how to correct it.
 It is very important to note, right from the beginning, that the order
 in which these corrections need to be handled is the following. First,
 CCD artifacts are corrected. Then, optionally, images are mosaicked with
-\texttt{dg\_mosaic} and map-projected. And jitter should be handled last,
-during stereo.
+\texttt{dg\_mosaic} and map-projected. And jitter should be handled
+last, during stereo. An exception is made for WV03 images, for which CCD
+artifacts do not appear to have a significant effect.
 
 Camera jitter has its origin in the fact that the measured position and
 orientation of the image-acquiring line sensor as specified in a camera
@@ -428,25 +431,31 @@ XML file is usually not perfectly accurate, the sensor in fact wiggles
 slightly from where it is assumed to be as it travels through space and
 appends rows of pixels to the image. This results in slight errors in
 the final DEM created using stereo. Those are most clearly seen in the
-intersection error map output by \texttt{point2dem -\/-errorimage}.
+intersection error map output by invoking \texttt{point2dem -\/-errorimage}.
 
-ASP provides support for correcting this jitter, at least its low
-frequency component. During stereo, right before the triangulation step,
-so after the left-to-right image disparity is computed, it can solve for
-adjustments to apply to the satellite position and orientation. Those
-adjustments are placed along-track (hence at several lines in the image)
-with interpolation between them. This is quite analogous to what
-\texttt{bundle\_adjust} is doing, except that the latter uses just one
-adjustment for each image.
+ASP provides support for correcting this jitter, at least its
+lower-frequency component. During stereo, right before the triangulation
+step, so after the left-to-right image disparity is computed, it can
+solve for adjustments to apply to the satellite position and
+orientation. Those adjustments are placed along-track (hence at several
+lines in the image) with interpolation between them. This is quite
+analogous to what \texttt{bundle\_adjust} is doing, except that the
+latter uses just one adjustment for each image.
 
 This process can be triggered by invoking \texttt{stereo} with
-\texttt{-\/-image-lines-per-piecewise-adjustment arg}. A smaller value
-of \texttt{arg} will result in more adjustments being used (each
-adjustment being responsible for fewer image lines), hence providing
-finer-grained control, though making this number too small may result in
-over-fitting and instability. A smaller value here will also require
-overall more interest point matches (as computed from the disparity),
-which is set via \texttt{-\/-num-matches-for-piecewise-adjustment}.
+\texttt{-\/-image-lines-per-piecewise-adjustment arg}. A recommended
+value here is 1000, though it is suggested to try several values. A
+smaller value of \texttt{arg} will result in more adjustments being used
+(each adjustment being responsible for fewer image lines), hence
+providing finer-grained control, though making this number too small may
+result in over-fitting and instability. A smaller value here will also
+require overall more interest point matches (as computed from the
+disparity), which is set via
+\texttt{-\/-num-matches-for-piecewise-adjustment}.
+
+Jitter correction is more effective if \texttt{stereo} is preceded by
+bundle adjustment, with the adjusted cameras then being passed to \texttt{stereo}
+via \texttt{-\/-bundle-adjust-prefix}.
 
 If it appears that the adjustments show some instability at the starting
 and ending lines due to not enough matches being present (as deduced
@@ -454,16 +463,17 @@ from examining the intersection error image), the locations of the first
 and last adjustment (and everything in between) may be brought closer to
 each other, by modifying \texttt{-\/-piecewise-adjustment-percentiles}.
 Its values are by default 5 and 95, and could be set for example to 10
-and 90.
+and 90. For very tall images, it may be desirable to use instead values
+closer to 0 and 100.
 
-Lastly, the way interpolation among adjustments is performed can be
-controlled with
+Section \ref{triangulation_options} has the full list of parameters
+used in jitter correction.
 
-\begin{verbatim}
-  --piecewise-adjustment-interp-type
-\end{verbatim}
-
-Section \ref{triangulation_options} describes these options in detail.
+In order for jitter correction to be successful, the disparity map
+(\texttt{*-F.tif}) should be of good quality. If that is not the case,
+it is suggested to redo stereo, and use, for example, map-projected
+images, and in the case of terrain lacking large scale features, the
+value \texttt{corr-seed-mode 3} (section \ref{sparse-disp}).
 
 An illustration of jitter correction is given in figure \ref{fig:jitter-example}.
 
@@ -534,8 +544,8 @@ this tool for your platform. The script and instructions are at
 \indent \href{https://github.com/NeoGeographyToolkit/BinaryBuilder/tree/master/build\_python\_modules}{https://github.com/NeoGeographyToolkit/BinaryBuilder/tree/master/build\_python\_modules}
 \end{quote}
 
-After building the \texttt{sparse\_disp} dependencies, per the instructions, the environmental
-variable \verb#ASP_PYTHON_MODULES_PATH# has to be set, for example as:
+After building the \texttt{sparse\_disp} dependencies, per the instructions, the path
+to the Python modules must be set, for example as:
 \begin{verbatim}
   export ASP_PYTHON_MODULES_PATH=<path to python modules>
 \end{verbatim}
@@ -1312,6 +1322,14 @@ use the \texttt{mapproject} tool (section \ref{mapproject}).
 
 \newpage
 
+\subsection{Correcting Camera Positions and Orientations}
+
+The \texttt{bundle\_adjust} program can be used to adjust the camera
+positions and orientations before running stereo. These adjustments only
+makes the cameras self-consistent. For the adjustments to be absolute,
+it is necessary to use \texttt{bundle\_adjust} with ground control
+points. This tool is described in section \ref{bundleadjust}.
+
 \subsection{Alignment to Point Clouds From a Different Source}
 \label{pc-align-example}
 Often the 3D terrain models output by \texttt{stereo} (point
@@ -1321,13 +1339,18 @@ kilometers, depending on the spacecraft. This can result from small
 errors in the position and orientation of the satellite cameras taking
 the pictures.
 
-ASP provides a tool named \texttt{pc\_align} for aligning such 3D
-terrains to a much more accurately positioned (if potentially sparser)
-dataset. Such datasets can be made up of ground control points (in the
-case of Earth), or from laser altimetry instruments on satellites, such
-as ICESat/GLASS for Earth, LRO/LOLA on the Moon, and MGS/MOLA on Mars.
-Under the hood, \texttt{pc\_align} uses the Iterative Closest Point
-algorithm (ICP) (both the point-to-plane and point-to-point flavors are supported).
+Such errors can be corrected in advance using bundle adjustment, as
+described in the previous section. That requires using ground control
+points, that may not be easy to collect. Alliteratively, the images and
+cameras can be used as they are, and the absolute position of the output
+point clouds can be corrected in post-processing. For that, ASP provides
+a tool named \texttt{pc\_align}. It aligns a 3D terrain to a much more
+accurately positioned (if potentially sparser) dataset. Such datasets
+can be made up of GPS measurements (in the case of Earth), or from
+laser altimetry instruments on satellites, such as ICESat/GLASS for
+Earth, LRO/LOLA on the Moon, and MGS/MOLA on Mars.  Under the hood,
+\texttt{pc\_align} uses the Iterative Closest Point algorithm (ICP)
+(both the point-to-plane and point-to-point flavors are supported).
 
 The \texttt{pc\_align} tool requires another input, an a priori guess for
 the maximum displacement we expect to see as result of alignment, i.e.,
@@ -1489,6 +1512,13 @@ The complete documentation is in section \ref{sec:image2qtree}.
 \end{center}
 \end{figure}
 
+\subsection{Using DERT to Visualize Terrain Models}
+
+The open source Desktop Exploration of Remote Terrain (DERT) software tool
+can be used to explore large digital terrain models, like those created by
+the Ames Stereo Pipeline.  For more information, visit \url{https://github.com/nasa/DERT}.
+
+
 \chapter{Tips and Tricks}
 
 Here we summarize, in one place, some insights in how to get the most
@@ -1514,7 +1544,8 @@ ISIS \texttt{crop} command) to a small region of interest.
 Bundle-adjustment can be used to find out the camera positions more
 accurately (section \ref{baasp}). CCD artifact correction can be used
 to remove artifacts from WorldView images (section
-\ref{wvcorrect-example}).
+\ref{wvcorrect-example}). Jitter correction can be used for Digital
+Globe imagery (section \ref{sec:jitter}).
 
 \item Align the output point cloud to some known absolute reference with
 \texttt{pc\_align} (section \ref{pc-align-example}).
@@ -1527,6 +1558,15 @@ from planet center or left camera center can be removed as outliers
 using \texttt{-\/-remove-outliers-params}. Spikes can be removed with
 \texttt{-\/-median-filter-params}. Points close to the boundary, that
 tend to be less accurate, can be eroded (\texttt{-\/-erode-length}).
+
+
+\item During stereo filtering, islands can be removed with
+\texttt{-\/-erode-max-size}.
+
+\item Remove noise from the low-resolution disparity (D\_sub) that can
+greatly slow down a run using  \texttt{-\/-rm-quantile-percentile} and
+\texttt{-\/-rm-quantile-multiple}. Some care is needed with these to
+not remove too much information.
 
 \item Fill holes in output orthoimages for nicer display (also in DEMs),
 during DEM and orthoimage generation with \texttt{point2dem} (section

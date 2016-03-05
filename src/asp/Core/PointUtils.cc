@@ -24,6 +24,7 @@
 #include <asp/Core/Common.h>
 #include <asp/Core/PointUtils.h>
 #include <vw/Cartography/Chipper.h>
+#include <vw/Core/Stopwatch.h>
 #include <boost/math/special_functions/fpclassify.hpp>
 
 using namespace vw;
@@ -36,6 +37,80 @@ namespace vw {
 }
 
 namespace asp{
+
+
+  void find_3D_affine_transform(vw::Matrix<double>     & in, 
+                                vw::Matrix<double>     & out,
+                                vw::Matrix<double,3,3> & rotation,
+                                vw::Vector<double,3>   & translation,
+                                double                 & scale) {
+    // Default output
+    rotation.set_identity();
+    translation.set_all(0.0);
+    scale = 1.0;
+    VW_ASSERT((in.rows() == 3) && (in.rows() == out.rows()) && (in.cols() == out.cols()), 
+              vw::ArgumentErr() << "find_3D_affine_transform(): input data is incorrect size.\n");
+
+    typedef vw::math::MatrixCol<vw::Matrix<double> > ColView;
+
+    // First find the scale, by finding the ratio of sums of some distances,
+    // then bring the datasets to the same scale.
+    double dist_in = 0, dist_out = 0;
+    for (size_t col = 0; col < in.cols()-1; col++) {
+      ColView inCol1 (in,  col), inCol2 (in,  col+1);
+      ColView outCol1(out, col), outCol2(out, col+1);
+      dist_in  += vw::math::norm_2(inCol2  - inCol1 );
+      dist_out += vw::math::norm_2(outCol2 - outCol1);
+    }
+    if (dist_in <= 0 || dist_out <= 0)
+      return;
+    scale = dist_out/dist_in;
+    out /= scale;
+
+    // Find the centroids then shift to the origin
+    vw::Vector3 in_ctr;
+    vw::Vector3 out_ctr;
+    for (size_t col = 0; col < in.cols(); col++) {
+      ColView inCol (in,  col);
+      ColView outCol(out, col);
+      in_ctr  += inCol;
+      out_ctr += outCol;
+    }
+    in_ctr  /= in.cols(); // Get the mean
+    out_ctr /= out.cols();
+    vw::Matrix<double> in_copy = in;
+    for (size_t col = 0; col < in.cols(); col++) { // Subtract mean from in and out
+      ColView inCol (in,  col);
+      ColView outCol(out, col);
+      inCol  -= in_ctr;
+      outCol -= out_ctr;
+    }
+
+    // SVD
+    vw::Matrix<double> cov = in * vw::math::transpose(out);
+    vw::Matrix<float> U, VT;
+    vw::Vector<float> s;
+    vw::math::svd(cov, U, s, VT);
+
+    // Find the rotation
+    double d = vw::math::det(vw::math::transpose(VT) * vw::math::transpose(U));
+    if (d > 0)
+      d = 1.0;
+    else
+      d = -1.0;
+    vw::Matrix3x3 I;
+    I.set_identity();
+    I(2, 2) = d;
+    vw::Matrix3x3 R = vw::math::transpose(VT) * I * vw::math::transpose(U);
+
+    // The final transform
+    rotation    = R;
+    translation = scale*(out_ctr - R*in_ctr);
+    return;
+  }
+
+
+
 
   // Classes to read points from CSV and LAS files one point at a
   // time. We basically implement an interface for CSV files
@@ -81,11 +156,11 @@ namespace asp{
   };
 
   class CsvReader: public BaseReader{
-    std::string m_csv_file;
+    std::string  m_csv_file;
     asp::CsvConv m_csv_conv;
-    bool m_is_first_line;
-    bool m_has_valid_point;
-    Vector3 m_curr_point;
+    bool         m_is_first_line;
+    bool         m_has_valid_point;
+    Vector3      m_curr_point;
     std::ifstream * m_ifs;
   public:
 
@@ -115,7 +190,7 @@ namespace asp{
     virtual bool ReadNextPoint(){
 
       std::string line;
-      Vector3 vals;
+      asp::CsvConv::CsvRecord vals;
 
       // Need to try twice, since perhaps the first time the header
       // was encountered. The routine below will throw if the second
@@ -242,11 +317,37 @@ namespace asp{
 //------------------------------------------------------------------------------------------
 // Class CsvConv functions
 
+std::string asp::CsvConv::write_header_string(std::string const delimiter) const{
+  std::stringstream s;
+  std::map<int, std::string>::const_iterator it;
+  for (it = this->col2name.begin(); it != this->col2name.end(); it++)
+    s << it->second << delimiter;
+  return s.str();
+}
+
+// This is a complete list of all supported column names, it must be kept up to date.
+int asp::CsvConv::get_sorted_index_for_name(std::string const& name){
+  if (name == "file"     ) return 3; // The string goes in a different location
+  if (name == "lon"      ) return 0;
+  if (name == "lat"      ) return 1;
+  if (name == "radius_m" ) return 2;
+  if (name == "radius_km") return 2;
+  if (name == "x"        ) return 0;
+  if (name == "y"        ) return 1;
+  if (name == "z"        ) return 2;
+  if (name == "easting"  ) return 0;
+  if (name == "northing" ) return 1;
+  if (name == "height_above_datum") return 2;
+
+  vw_throw( ArgumentErr() << "Unsupported column name: " << name );
+}
+
 void asp::CsvConv::parse_csv_format(std::string const& csv_format_str,
                                     std::string const& csv_proj4_str){
 
   // Parse the CSV format string and build the data structure which
   // will enable to convert from CSV to Cartesian and vice-versa.
+  // - The user specifies THREE values that determine the coordinate.
 
   // Make sure that these custom terms do not appear in the proj4 string.
   if ((csv_proj4_str.find("D_MOON") != std::string::npos) ||
@@ -255,22 +356,23 @@ void asp::CsvConv::parse_csv_format(std::string const& csv_format_str,
                            << "Specify the datum elsewhere or define radii manually.\n");
   }
 
-  *this = asp::CsvConv(); // reset
+  *this = asp::CsvConv(); // Reset this object to the default state
 
-  this->csv_format_str = csv_format_str;
+  this->csv_format_str = csv_format_str; // Record inputs
   this->csv_proj4_str  = csv_proj4_str;
 
-  std::string local = csv_format_str;
+  std::string local = csv_format_str; // Make lowercase
   boost::algorithm::to_lower(local);
 
-  if (local == "")
+  if (local == "") // No format string passed in!
     return;
 
-  boost::replace_all(local, ":", " ");
+  boost::replace_all(local, ":", " "); // Convert to space delimited
   boost::replace_all(local, ",", " ");
   std::istringstream is(local);
 
   // The case of utm: "utm:23N 1:x 2:y 3:height_above_datum"
+  // - Parse the initial bit to get utm_zone and utm_north, leave the rest alone.
   std::string str;
   is >> str;
   if (str == "utm"){
@@ -282,12 +384,38 @@ void asp::CsvConv::parse_csv_format(std::string const& csv_format_str,
     is.str(local);
   }
 
+  int col;
+  std::string name;
+  while (is.good()) {
+    // Grab the next two elements
+    if (! (is >> col >> name))
+      vw_throw(ArgumentErr() << "Could not parse: '" << csv_format_str << "'\n");
+
+    // Convert to zero-based indexing and error check
+    col--;
+    if ( (col<0) || (this->col2name.count(col)) )
+      vw_throw(ArgumentErr() << "Illegal column index in: '" << csv_format_str << "'\n");
+
+    // Store in the lookup maps
+    this->name2col[name] = col;
+    this->col2name[col ] = name;
+  }
+  this->num_targets = this->name2col.size();
+  const int NUM_POINT_VALS  = 3;
+  const int MIN_NUM_TARGETS = NUM_POINT_VALS;
+  const int MAX_NUM_TARGETS = NUM_POINT_VALS + 1; // Location and a file
+  if ((this->num_targets < MIN_NUM_TARGETS) || (this->num_targets > MAX_NUM_TARGETS))
+    vw_throw(ArgumentErr() << "Invalid number of column indices in: '" << csv_format_str << "'\n");
+
+  /*
+
+  // Read in the three user inputs
   int col1, col2, col3;
   std::string name1, name2, name3;
   if (! (is >> col1 >> name1 >> col2 >> name2 >> col3 >> name3) )
     vw_throw(ArgumentErr() << "Could not parse: '" << csv_format_str << "'\n");
 
-  col1--;
+  col1--; // Convert from 1-based to 0-based
   col2--;
   col3--;
   if (col1 < 0 || col2 < 0 || col3 < 0)
@@ -298,25 +426,27 @@ void asp::CsvConv::parse_csv_format(std::string const& csv_format_str,
     vw_throw(ArgumentErr() << "The column indices must be distinct in: '"
                            << csv_format_str << "'\n");
 
-  this->name2col[name1] = col1;
+  this->name2col[name1] = col1; // Fill in name->column map object
   this->name2col[name2] = col2;
   this->name2col[name3] = col3;
 
-  // For each column index to read, map to corresponding column name
-  this->col2name[col1] = name1;
+  this->col2name[col1] = name1; // Fill in column->name map object
   this->col2name[col2] = name2;
   this->col2name[col3] = name3;
+*/
 
-  // Find the position of the longitude field
-  int k = 0;
-  for (std::map<int, std::string>::iterator it = this->col2name.begin(); it != this->col2name.end() ; it++){
-    if (it->second == "lon") this->lon_index = k;
-    if (it->second == "lat") this->lat_index = k;
-    k++;
+  // Sort the names into a pre-specified order.
+  std::vector<std::string> sorted_names(this->num_targets);
+  for (std::map<std::string, int>::iterator it = this->name2col.begin(); it != this->name2col.end() ; it++){
+    int index = get_sorted_index_for_name(it->first);
+    sorted_names[index] = it->first;
+    if (index < NUM_POINT_VALS) // Currently only the point data goes into a vector
+      this->col2sort[it->second] = index;
   }
 
-  // Find the position of a column after the columns are sorted
-  // alphabetically.
+/*
+  // Iterate through the column names in alphabetical order and record the indices
+  // - This will make it easy to reorder values alphabetically later on
   std::vector<std::string> sorted_names;
   int count = 0;
   for (std::map<std::string, int>::iterator it = this->name2col.begin(); it != this->name2col.end() ; it++){
@@ -324,24 +454,25 @@ void asp::CsvConv::parse_csv_format(std::string const& csv_format_str,
     this->col2sort[it->second] = count;
     count++;
   }
-
+*/
+  // From the input strings, determine which set type applies to this file.
   if (sorted_names[0] == "x" && sorted_names[1] == "y" && sorted_names[2] == "z"){
     this->format = XYZ;
-  }else if (sorted_names[0] == "lat" &&
-            sorted_names[1] == "lon" &&
+  }else if (sorted_names[0] == "lon" &&
+            sorted_names[1] == "lat" &&
             sorted_names[2] == "radius_m"){
     this->format = LAT_LON_RADIUS_M;
-  }else if (sorted_names[0] == "lat" &&
-            sorted_names[1] == "lon" &&
+  }else if (sorted_names[0] == "lon" &&
+            sorted_names[1] == "lat" &&
             sorted_names[2] == "radius_km"){
     this->format = LAT_LON_RADIUS_KM;
-  }else if (sorted_names[0] == "height_above_datum" &&
-            sorted_names[1] == "lat"                &&
-            sorted_names[2] == "lon"){
+  }else if (sorted_names[0] == "lon" &&
+            sorted_names[1] == "lat" &&
+            sorted_names[2] == "height_above_datum"){
     this->format = HEIGHT_LAT_LON;
-  }else if (sorted_names[0] == "easting"            &&
-            sorted_names[1] == "height_above_datum" &&
-            sorted_names[2] == "northing"){
+  }else if (sorted_names[0] == "easting"  &&
+            sorted_names[1] == "northing" &&
+            sorted_names[2] == "height_above_datum"){
     this->format = EASTING_HEIGHT_NORTHING;
   }else{
     vw_throw( ArgumentErr() << "Cannot understand the csv format string: "
@@ -375,45 +506,56 @@ bool asp::CsvConv::parse_georef(vw::cartography::GeoReference & georef) const {
   return false;
 }
 
-vw::Vector3 asp::CsvConv::parse_csv_line(bool & is_first_line, bool & success,
-                                std::string const& line) const {
+#include <iomanip>
+
+asp::CsvConv::CsvRecord asp::CsvConv::parse_csv_line(bool & is_first_line, bool & success,
+                                                     std::string const& line) const {
   // Parse a CSV file line in given format
   success = true;
 
-  const int bufSize = 1024;
+  // Copy the input line into a temporary buffer
+  const int bufSize = 2048;
   char temp[bufSize];
+  strncpy(temp, line.c_str(), bufSize);
 
   std::string sep = asp::csv_separator();
 
-  strncpy(temp, line.c_str(), bufSize);
-
-  int col_index = -1;
-  int num_read = 0;
+  int col_index = -1; // The current column we are reading
+  int num_floats_read = 0;
+  int num_values_read = 0;
 
   char * ptr = temp;
-  Vector3 vals;
+  CsvRecord values;
   while(1){
 
-    col_index++;
-    const char* token = strtok(ptr, sep.c_str()); ptr = NULL;
+    col_index++; // Increment the column counter
+    const char* token = strtok(ptr, sep.c_str());  // Split line on seperator char
+    ptr = NULL; // After the first call, strtok expects a null pointer as input.
     if ( token == NULL ) break; // no more tokens
-    if ( num_read >= 3 ) break; // read enough numbers
+    if ( num_values_read >= this->num_targets ) break; // read enough values
 
-    // Look only at indices we are supposed to read
+    // Check if this is one of the columns we need to read
     if (this->col2name.find(col_index) == this->col2name.end())
       continue;
 
-    double val;
-    int flag = sscanf(token, "%lg", &val);
-    if (flag == 0){
-      success = false;
-      break;
+    if (this->col2name.at(col_index) == "file") // This is a string input
+      values.file = token;
+    else {
+      // Parse the floating point value from the token
+      double val;
+      int flag = sscanf(token, "%lg", &val);
+      if (flag == 0){ // Handle parsing failure
+        success = false;
+        break;
+      }
+      values.point_data[num_floats_read] = val;
+      num_floats_read++;
     }
-    vals[num_read] = val;
-    num_read++;
-  }
+    num_values_read++;
 
-  if (num_read != (int)vals.size())
+  } // End loop through columns
+
+  if (num_values_read != this->num_targets)
     success = false;
 
   // Be prepared for the fact that the first line may be the header.
@@ -425,25 +567,72 @@ vw::Vector3 asp::CsvConv::parse_csv_line(bool & is_first_line, bool & success,
   }
 
   is_first_line = false;
-  return vals;
+  return values;
 }
 
-Vector3 asp::CsvConv::csv_to_cartesian_or_point_height(Vector3 const& csv,
-                                              GeoReference const& geo,
-                                              bool return_point_height) const{
-  // Convert values read from a csv file (in the same order as in the file)
-  // to a Cartesian point. If return_point_height is true, and the csv point is not
-  // in xyz format, return instead the projected point and height above datum.
 
-  // Convert the entries from the order they were in the csv file to
-  // the order in which the names of the entries are sorted
-  // alphabetically (e.g., in order height_above_datum, lat, lon).
+size_t asp::CsvConv::parse_entire_file(std::string    const & file_path,
+                                       std::list<CsvRecord> & output_list) const {
+  // Clear output object
+  output_list.clear();
+
+  // Open input file
+  std::ifstream file( file_path.c_str() );
+  if( !file )
+    vw_throw( vw::IOErr() << "Unable to open file \"" << file_path << "\"" );
+
+  // Read through all the lines of the input file, parse each line, and build the output list.
+  bool success;
+  bool first_line = true;
+  std::string line = "";
+  while ( std::getline(file, line, '\n') ){
+    CsvRecord new_record = asp::CsvConv::parse_csv_line(first_line, success, line);
+    if (success)
+      output_list.push_back(new_record);
+    first_line = false;
+  }
+
+  file.close();
+
+  return output_list.size();
+}
+
+
+vw::Vector3 asp::CsvConv::sort_parsed_vector3(CsvRecord const& csv) const {
   Vector3 ordered_csv;
   int count = 0;
+  const int NUM_POINT_PARAMS = 3;
   for (std::map<int, int>::const_iterator it = this->col2sort.begin(); it != this->col2sort.end(); it++){
-    ordered_csv[it->second] = csv[count];
+    if (it->second < NUM_POINT_PARAMS) // Don't include elements past the first three
+      ordered_csv[it->second] = csv.point_data[count];
     count++;
   }
+  return ordered_csv;
+}
+
+
+vw::Vector3 asp::CsvConv::unsort_vector3(vw::Vector3 const& csv) const {
+  Vector3 csv2;
+  int count = 0;
+  const int NUM_POINT_PARAMS = 3;
+  for (std::map<int, int>::const_iterator it = this->col2sort.begin(); it != this->col2sort.end(); it++){
+    if (it->second < NUM_POINT_PARAMS){ // Don't include elements past the first three
+      csv2[count] = csv[it->second];
+      count++;
+    }
+  }
+  return csv2;
+}
+
+
+
+// There is a lot of repeated code for the next three functions in order to
+//  improve the speed of parsing points by doing the minimum number of conversions.
+
+Vector3 asp::CsvConv::csv_to_cartesian_or_point_height(CsvRecord const& csv,
+                                                       GeoReference const& geo,
+                                                       bool return_point_height) const{
+  Vector3 ordered_csv = sort_parsed_vector3(csv);
 
   if (this->format == XYZ)
     return ordered_csv; // already as xyz
@@ -451,27 +640,20 @@ Vector3 asp::CsvConv::csv_to_cartesian_or_point_height(Vector3 const& csv,
   Vector3 xyz;
 
   if (this->format == EASTING_HEIGHT_NORTHING){
-
-    // go from easting, height, northing to easting, northing, height
-    Vector3 point_height = Vector3(ordered_csv[0], ordered_csv[2], ordered_csv[1]);
+    Vector3 point_height = Vector3(ordered_csv[0], ordered_csv[1], ordered_csv[2]);
     if (return_point_height) return point_height;
 
-    Vector2 ll = geo.point_to_lonlat(Vector2(point_height[0], point_height[1]));
+    Vector2 ll  = geo.point_to_lonlat(Vector2(point_height[0], point_height[1]));
     Vector3 llh = Vector3(ll[0], ll[1], point_height[2]); // now lon, lat, height
     xyz = geo.datum().geodetic_to_cartesian(llh);
 
   }else if (this->format == HEIGHT_LAT_LON){
-
-    std::swap(ordered_csv[0], ordered_csv[2]); // now lon, lat, height
     if (return_point_height)
       return ordered_csv;
 
     xyz = geo.datum().geodetic_to_cartesian(ordered_csv);
 
   }else{ // Handle asp::LAT_LON_RADIUS_M and asp::LAT_LON_RADIUS_KM
-
-    std::swap(ordered_csv[0], ordered_csv[1]); // now lon, lat, radius_(k)m
-
     if (this->format == LAT_LON_RADIUS_KM)
       ordered_csv[2] *= 1000.0; // now lon, lat, radius_m
 
@@ -480,23 +662,99 @@ Vector3 asp::CsvConv::csv_to_cartesian_or_point_height(Vector3 const& csv,
 
     // Update the radius
     xyz = ordered_csv[2]*(xyz/norm_2(xyz));
-
     if (return_point_height)
       return geo.datum().cartesian_to_geodetic(xyz);
   }
   return xyz;
 }
 
+
+vw::Vector3 asp::CsvConv::csv_to_cartesian(CsvRecord const& csv,
+                                           vw::cartography::GeoReference const& geo) const {
+  Vector3 ordered_csv = sort_parsed_vector3(csv);
+
+  Vector3 xyz;
+  if (this->format == XYZ){
+    return ordered_csv; // already as xyz
+
+  }else if (this->format == EASTING_HEIGHT_NORTHING){
+    Vector3 point_height = Vector3(ordered_csv[0], ordered_csv[1], ordered_csv[2]);
+    Vector2 ll           = geo.point_to_lonlat(Vector2(point_height[0], point_height[1]));
+    Vector3 llh          = Vector3(ll[0], ll[1], point_height[2]); // now lon, lat, height
+    xyz = geo.datum().geodetic_to_cartesian(llh);
+
+  }else if (this->format == HEIGHT_LAT_LON){
+    xyz = geo.datum().geodetic_to_cartesian(ordered_csv);
+
+  }else{ // Handle asp::LAT_LON_RADIUS_M and asp::LAT_LON_RADIUS_KM
+    if (this->format == LAT_LON_RADIUS_KM)
+      ordered_csv[2] *= 1000.0; // now lon, lat, radius_m
+
+    Vector3 tmp = ordered_csv; tmp[2] = 0; // now lon, lat, 0
+    xyz = geo.datum().geodetic_to_cartesian(tmp);
+
+    // Update the radius
+    xyz = ordered_csv[2]*(xyz/norm_2(xyz));
+  }
+  return xyz;
+}
+
+vw::Vector3 asp::CsvConv::csv_to_geodetic(CsvRecord const& csv,
+                                          vw::cartography::GeoReference const& geo) const {
+  Vector3 ordered_csv = sort_parsed_vector3(csv);
+  Vector3 llh;
+
+  if (this->format == XYZ){
+    llh = geo.datum().cartesian_to_geodetic(ordered_csv);
+
+  }else if (this->format == EASTING_HEIGHT_NORTHING){
+    Vector3 point_height = Vector3(ordered_csv[0], ordered_csv[1], ordered_csv[2]);
+    Vector2 ll           = geo.point_to_lonlat(Vector2(point_height[0], point_height[1]));
+    llh = Vector3(ll[0], ll[1], point_height[2]); // now lon, lat, height
+
+  }else if (this->format == HEIGHT_LAT_LON){
+    return ordered_csv;
+
+  }else{ // Handle asp::LAT_LON_RADIUS_M and asp::LAT_LON_RADIUS_KM
+    if (this->format == LAT_LON_RADIUS_KM)
+      ordered_csv[2] *= 1000.0; // now lon, lat, radius_m
+
+    Vector3 tmp = ordered_csv; tmp[2] = 0; // now lon, lat, 0
+    Vector3 xyz = geo.datum().geodetic_to_cartesian(tmp);
+
+    // Update the radius
+    xyz = ordered_csv[2]*(xyz/norm_2(xyz));
+    llh = geo.datum().cartesian_to_geodetic(xyz);
+  }
+  return llh;
+}
+
+
+vw::Vector2 asp::CsvConv::csv_to_lonlat(CsvRecord const& csv,
+                                        vw::cartography::GeoReference const& geo) const {
+  Vector3 ordered_csv = sort_parsed_vector3(csv);
+
+  if (this->format == XYZ){
+    Vector3 llh = geo.datum().cartesian_to_geodetic(ordered_csv);
+    return Vector2(llh[0], llh[1]);
+  }else if (this->format == EASTING_HEIGHT_NORTHING){
+    return geo.point_to_lonlat(Vector2(ordered_csv[0], ordered_csv[1]));
+  }else if (this->format == HEIGHT_LAT_LON){
+    return Vector2(ordered_csv[0], ordered_csv[1]);
+  }else{ // Handle asp::LAT_LON_RADIUS_M and asp::LAT_LON_RADIUS_KM
+    return Vector2(ordered_csv[0], ordered_csv[1]);
+  }
+
+}
+
 Vector3 asp::CsvConv::cartesian_to_csv(Vector3 const& xyz,
-                              GeoReference const& geo,
-                              double mean_longitude) const{
-  // Convert an xyz point to the fields we can write in a CSV file, in
-  // the same order as in the input CSV file.
+                                       GeoReference const& geo,
+                                       double mean_longitude) const{
   Vector3 csv;
   if (this->format == XYZ){
     csv = xyz; // order is x, y, z
 
-  }else{ // format != XYZ
+  }else{ // format != XYZ, convert to the csv format.
 
     // Must assert here that the datum was specified.
 
@@ -507,36 +765,28 @@ Vector3 asp::CsvConv::cartesian_to_csv(Vector3 const& xyz,
 
       // go from lon, lat to easting, northing
       Vector2 en = geo.lonlat_to_point(Vector2(llh[0], llh[1]));
-      csv = Vector3(en[0], llh[2], en[1]); // order is easting, height, northing
+      csv = Vector3(en[0], en[1], llh[2]); // order is easting, northing, height
 
     }else if (this->format == HEIGHT_LAT_LON){
-
-      std::swap(llh[0], llh[2]); // order is height, lat, lon
       csv = llh;
 
     }else{
       // Handle asp::LAT_LON_RADIUS_M and asp::LAT_LON_RADIUS_KM
-      std::swap(llh[0], llh[1]); // order is lat, lon, height
 
-      llh[2] = norm_2(xyz); // order is lat, lon, radius_m
+      llh[2] = norm_2(xyz); // order is lon, lat, radius_m
 
       if (this->format == LAT_LON_RADIUS_KM){
-        llh[2] /= 1000.0; // order is lat, lon, radius_km
+        llh[2] /= 1000.0; // order is lon, lat, radius_km
       }
       csv = llh;
     }
   }
+  // Now the csv vector contains the sorted values for our format
 
   // Now we have the csv fields, but they are in the order
   // corresponding to the sorted column names. Need to put them
   // in the same order as they were in the file originally.
-  Vector3 csv2;
-  int count = 0;
-  for (std::map<int, int>::const_iterator it = this->col2sort.begin(); it != this->col2sort.end(); it++){
-    csv2[count] = csv[it->second];
-    count++;
-  }
-  return csv2;
+  return unsort_vector3(csv);
 }
 
 
@@ -789,4 +1039,25 @@ vw::BBox3 asp::pointcloud_bbox(vw::ImageViewRef<vw::Vector3> const& point_image,
   progress_bar.report_finished();
 
   return result;
+}
+
+// Find the average longitude for a given point image with lon, lat, height values
+double asp::find_avg_lon(ImageViewRef<Vector3> const& point_image){
+
+  Stopwatch sw;
+  sw.start();
+  int32 subsample_amt = int32(norm_2(Vector2(point_image.cols(),
+                                             point_image.rows()))/32.0);
+  if (subsample_amt < 1 )
+    subsample_amt = 1;
+  PixelAccumulator<MeanAccumulator<Vector3> > mean_accum;
+  for_each_pixel( subsample(point_image, subsample_amt),
+                  mean_accum,
+                  TerminalProgressCallback("asp","Statistics: ") );
+  Vector3 avg_location = mean_accum.value();
+  double avg_lon = avg_location.x() >= 0 ? 0 : 180;
+  sw.stop();
+  vw_out(DebugMessage,"asp") << "Statistics time: " << sw.elapsed_seconds() << std::endl;
+
+  return avg_lon;
 }
